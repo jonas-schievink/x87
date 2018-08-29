@@ -15,8 +15,10 @@
 #[macro_use] extern crate log;
 extern crate ieee754;
 
+mod f80_algo;
 mod f80_mod;
 mod f80_ops;
+mod significand;
 
 pub use f80_mod::*;
 
@@ -35,6 +37,27 @@ pub enum Exception {
     Denormalized,
     /// Invalid arithmetic operation or register stack over/underflow.
     InvalidOperation,
+}
+
+/// The different rounding modes supported by the x87.
+#[derive(Debug)]
+pub enum RoundingMode {
+    /// Round results to the nearest representable number. If both surrounding
+    /// numbers have the same distance, round to the even number ("ties to
+    /// even").
+    Nearest,
+    /// Round towards `-Inf`.
+    Down,
+    /// Round towards `+Inf`.
+    Up,
+    /// Round towards 0 (truncate).
+    Zero,
+}
+
+impl Default for RoundingMode {
+    fn default() -> Self {
+        RoundingMode::Nearest
+    }
 }
 
 bitflags! {
@@ -134,7 +157,7 @@ impl Default for ControlRegister {
 }
 
 /// 2-bit tag stored in the tag word; marks the corresponding physical register.
-enum Tag {
+/*enum Tag {
     Valid   = 0b00,
     Zero    = 0b01,
     Special = 0b10,
@@ -152,18 +175,18 @@ impl Tag {
             _ => panic!("invalid tag {:#b}", raw),
         }
     }
-}
+}*/
 
-/// A physical FPU register (0-7).
+/*/// A physical FPU register (0-7).
 ///
 /// This is independent of the `TOP` of the stack.
 #[derive(Debug)]
 struct PhysReg(u8);
-
+*/
 /// A register in the FPU register stack.
 #[derive(Debug)]
 pub struct StackReg(u8);
-
+/*
 /// Stores tag bits for the registers.
 #[derive(Debug)]
 struct TagWord(u16);
@@ -173,7 +196,7 @@ impl TagWord {
         let raw = (self.0 >> (reg.0 * 2)) & 0b11;
         Tag::from_raw(raw as u8)
     }
-}
+}*/
 
 /// The x87 coprocessor.
 // x87 BCD coprocessor

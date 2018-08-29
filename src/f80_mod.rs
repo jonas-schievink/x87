@@ -5,7 +5,7 @@ use std::{f32, f64, fmt};
 #[repr(transparent)]
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Default)]
-pub struct f80(pub(crate) u128);
+pub struct f80(u128);
 
 impl f80 {
     pub const ZERO: Self         = f80(0);
@@ -15,10 +15,16 @@ impl f80 {
     /// Not a Number (`NaN`).
     ///
     /// This is a quiet NaN (qNaN) with the same payload as returned by invalid
-    /// operantions (such as `0.0 / 0.0`). The sign bit is not set.
+    /// operations (such as `0.0 / 0.0`). The sign bit is not set.
     pub const NAN: Self          = f80(0x7fff_C000_0000_0000_0000);
 
+    /// The value to subtract from the raw exponent field to get the actual
+    /// exponent.
     const EXPONENT_BIAS: i16 = 16383;
+    const MIN_EXPONENT: i16 = 1 - Self::EXPONENT_BIAS;
+    const MAX_EXPONENT: i16 = 0b0111_1111_1111_1110 - Self::EXPONENT_BIAS;
+    /// Exponent used for all denormals.
+    const DENORMAL_EXPONENT: i16 = -16382;
 
     /// Create an f80 from its raw byte representation.
     pub fn from_bytes(bytes: [u8; 10]) -> Self {
@@ -49,29 +55,41 @@ impl f80 {
         bytes
     }
 
+    pub fn from_bits(raw: u128) -> Self {
+        assert_eq!(raw & 0xffff_ffff_ffff_ffff_ffff, raw, "invalid bits set");
+        f80(raw)
+    }
+
+    pub fn to_bits(&self) -> u128 {
+        self.0
+    }
+
     /// Converts an `f32` to an `f80`. This is lossless and no rounding is
     /// performed.
     pub fn from_f32(f: f32) -> Self {
         let (sign, exp, significand) = f.decompose();
         let raw_exp = f.decompose_raw().1;
-        //println!("from {} ({:#010X}) sign={} exp={} raw_exp={:#04X} significand={:#08X}", f, f.to_bits(), sign, exp, raw_exp, significand);
+        trace!("from_f32: {} ({:?}, {:#010X}) sign={} exp={} raw_exp={:#04X} significand={:#08X}", f, f.classify(), f.to_bits(), sign, exp, raw_exp, significand);
 
         let f80_fraction = u64::from(significand) << 40;    // 23-bit -> 63-bit
-        let cls = match raw_exp {
+        let decomp = match raw_exp {
             0x00 => match significand {
-                0 => Classified::Zero { sign },
-                _ => Classified::Denormal { sign, integer_bit: false, fraction: f80_fraction },
+                0 => Decomposed::zero(),
+                _ => {
+                    // f32 denormal, exponent is -126, integer bit unset.
+                    Decomposed { sign, exponent: -126, significand: f80_fraction.into() }
+                },
             }
             0xFF => match significand {
-                0 => Classified::Inf { sign },
+                0 => return if sign { Self::NEG_INFINITY } else { Self::INFINITY },
                 _ => match significand & (1 << 22) {
-                    0 => Classified::SNaN { sign, payload: u64::from(significand) },
-                    _ => Classified::QNaN { sign, payload: u64::from(significand & !(1 << 22)) },
+                    0 => return Classified::SNaN { sign, payload: u64::from(significand) }.pack(),
+                    _ => return Classified::QNaN { sign, payload: u64::from(significand & !(1 << 22)) }.pack(),
                 }
             }
-            _ => Classified::Normal { sign, exponent: exp, fraction: f80_fraction },
+            _ => Decomposed { sign, exponent: exp, significand: (1 << 63) | u128::from(f80_fraction) },
         };
-        cls.pack()
+        Self::from_decomposed(decomp).unwrap_exact()
     }
 
     /// Converts an `f64` to an `f80`. This is lossless and no rounding is
@@ -99,6 +117,82 @@ impl f80 {
         cls.pack()
     }
 
+    /// Creates a normal, denormal, or zero `f80` from its decomposed
+    /// components.
+    ///
+    /// `decomp` will be normalized and rounded to fit in the `f80` encoding
+    /// space.
+    pub fn from_decomposed(decomp: Decomposed) -> FloatResult<Self> {
+        let orig_decomp = decomp;
+        let decomp = decomp.normalize();
+        let exact = decomp.is_exact();
+        trace!("from_decomposed: {:?} -> {:?}", orig_decomp, decomp);
+        let decomp = decomp.unwrap_exact_or_rounded();
+
+        let sign = if decomp.sign { 1 << 79 } else { 0 };
+
+        if decomp.significand == 0 {
+            // Encodes `+0.0` or `-0.0`
+            return FloatResult::Exact(f80(sign));
+        }
+
+        // If the exponent is in the "normal" range, we can represent this
+        // number as a normal f80 (the integer bit is set anyway since this is
+        // normalized).
+        if decomp.exponent >= f80::MIN_EXPONENT && decomp.exponent <= f80::MAX_EXPONENT {
+            let exp = (decomp.exponent + Self::EXPONENT_BIAS) as u128;
+            assert_eq!(exp & 0x8000, 0, "MSb set");
+            let exp = exp << 64;
+            let result = f80(sign | exp | decomp.significand);
+            trace!("-> normal {:?} (sign={}, raw_exp={:X}, exact={})", result, sign, exp, exact);
+            if exact {
+                FloatResult::Exact(result)
+            } else {
+                FloatResult::Rounded(result)
+            }
+        } else if decomp.exponent > f80::MAX_EXPONENT {
+            // Cannot be represented as normal or denormal since it's far too
+            // large
+            if sign != 0 {
+                FloatResult::TooSmall
+            } else {
+                FloatResult::TooLarge
+            }
+        } else {
+            // Exponent is smaller than what we'd like. This will end up being a
+            // denormal or, if the significand doesn't have enough bits, zero.
+            // One cool thing is that a denormal with an all-zero significand
+            // ends up being the encoding for zero, so we don't have to special-
+            // case this.
+            let denorm = decomp.adjust_exponent_to(f80::DENORMAL_EXPONENT);
+            let exact = exact && denorm.is_exact();
+            let significand = denorm.unwrap_exact_or_rounded().significand;
+
+            // Encode denormal.
+            let result = f80(sign | significand);
+            if exact {
+                FloatResult::Exact(result)
+            } else {
+                FloatResult::Rounded(result)
+            }
+        }
+    }
+
+    pub(crate) fn with_signed_and_exponent(signed: i128, exponent: i16) -> FloatResult<Self> {
+        if signed == 0 {    // FIXME where should we handle signed zero?
+            return FloatResult::Exact(f80::ZERO);
+        }
+
+        let unsigned = signed.abs() as u128;
+        let sign = signed < 0;
+        let decomp = Decomposed {
+            sign,
+            exponent,
+            significand: unsigned,
+        };
+        Self::from_decomposed(decomp)
+    }
+
     /// Converts `self` to an `f32`, possibly rounding in the process.
     pub fn to_f32(&self) -> f32 {
         self.to_f32_checked().into_inner()
@@ -115,14 +209,12 @@ impl f80 {
         // use the more "developer-friendly" output of `classify()` and
         // translate each case to the corresponding IEEE representation.
         let classified = self.classify();
+        trace!("to_f32_checked: self={:?}={:?}={:?}", self, classified, classified.decompose());
         match classified {
             Classified::Zero { sign } => {
                 FloatResult::Exact(if sign { -0.0 } else { 0.0 })
             },
-            Classified::Inf { sign } => {
-                FloatResult::Exact(if sign { -1.0/0.0 } else { 1.0/0.0 })
-            },
-            Classified::Denormal { sign, integer_bit: _, fraction } => {
+            /*Classified::Denormal { sign, integer_bit: _, fraction } => {
                 let raw_exp = 0;
                 let frac = (fraction >> 40) & 0x007f_ffff; // truncate fraction to the upper 23 bits
                 let result = f32::recompose_raw(sign, raw_exp, frac as u32);
@@ -147,9 +239,12 @@ impl f80 {
                         FloatResult::TooLarge
                     },
                 }
-            }
+            }*/
+            Classified::Inf { sign } => {
+                FloatResult::Exact(if sign { -1.0/0.0 } else { 1.0/0.0 })
+            },
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
-            // the significant as an "is_quiet" flag. x87 does this and it
+            // the significand as an "is_quiet" flag. x87 does this and it
             // matches up with using a zero-payload SNaN for Infinities.
             Classified::SNaN { sign, payload } |
             Classified::QNaN { sign, payload } => {
@@ -169,6 +264,57 @@ impl f80 {
                     FloatResult::Exact(result)
                 } else {
                     FloatResult::LostNaN(result)
+                }
+            }
+            _ => {
+                let decomp = self.decompose().unwrap().normalize();
+                let exact = decomp.is_exact();
+                let decomp = decomp.unwrap_exact_or_rounded();
+                trace!("finite: {:?}; exact={}", decomp, exact);
+
+                // If the exponent is too small for f32, try encoding as a
+                // denormal, then fall back to rounding to 0. If it's too large,
+                // we've hit +/-Inf.
+                if decomp.exponent >= -126 && decomp.exponent <= 127 {
+                    // Fits in a normal f32, but significand might need
+                    // rounding. Go from 63 fraction bits to 23:
+                    let exact = exact && (decomp.significand & 0xffff_ff00_0000_0000) == decomp.significand;
+                    let fraction = (decomp.significand & 0x7fff_ff00_0000_0000) >> 40;
+                    let result = f32::recompose(decomp.sign, decomp.exponent, fraction as u32);
+                    trace!("normal; exp={}; frac={:X}; exact={}; result={}", decomp.exponent, fraction, exact, result);
+                    if exact {
+                        FloatResult::Exact(result)
+                    } else {
+                        FloatResult::Rounded(result)
+                    }
+                } else if decomp.exponent < -126 {
+                    // Too close to 0.0 to be a normal float. Try denormal,
+                    // rounding to zero if that also doesn't fit.
+                    // Denormals need an exponent of -126:
+                    let decomp = decomp.adjust_exponent_to(-126);
+                    let exact = exact && decomp.is_exact();
+                    let decomp = decomp.unwrap_exact_or_rounded();
+                    trace!("needs denormal. adj={:?}; exact={}", decomp, exact);
+                    // Extract the 23 fraction bits we have left:
+                    let fraction = (decomp.significand & 0x7fff_ff00_0000_0000) >> 40;
+                    let exact = exact && (fraction << 40) == decomp.significand;
+                    // The `fraction` bits might end up being all zero. In that
+                    // case, the f32 will encode zero, which is correct here.
+                    let sign = if decomp.sign { 0x8000_0000 } else { 0 };
+                    let result = f32::from_bits(sign | fraction as u32);
+                    if exact {
+                        FloatResult::Exact(result)
+                    } else {
+                        FloatResult::Rounded(result)
+                    }
+                } else {
+                    // Exponent too large. Number too large or small for f32
+                    // range. "Round" to +/-Inf.
+                    if decomp.sign {
+                        FloatResult::TooSmall
+                    } else {
+                        FloatResult::TooLarge
+                    }
                 }
             }
         }
@@ -215,7 +361,7 @@ impl f80 {
                 }
             }
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
-            // the significant as an "is_quiet" flag. x87 does this and it
+            // the significand as an "is_quiet" flag. x87 does this and it
             // matches up with using a zero-payload SNaN for Infinities.
             Classified::SNaN { sign, payload } |
             Classified::QNaN { sign, payload } => {
@@ -297,7 +443,7 @@ impl f80 {
         (self.0 & 0x7fff_ffff_ffff_ffff) as u64
     }
 
-    /// Returns the 64-bit significant, including the explicit integer bit.
+    /// Returns the 64-bit significand, including the explicit integer bit.
     ///
     /// The MSb of the returned value is the integer part (1 for normalized
     /// numbers), the remaining 63 bits are the fractional part.
@@ -358,6 +504,10 @@ impl f80 {
         };
         //println!("classify: {:?} -> {:?}", self, cls);
         Some(cls)
+    }
+
+    pub fn decompose(&self) -> Option<Decomposed> {
+        self.classify_checked().and_then(|cls| cls.decompose())
     }
 }
 // TODO: implement as much as is useful from `f32` and `f64`
@@ -435,6 +585,21 @@ pub enum FloatResult<T> {
     /// replaced by a different value because the payload had a special meaning
     /// for the target type.
     LostNaN(T),
+    /// An operand of the performed operation was invalid.
+    ///
+    /// If the invalid operand exception is masked, the result of the operation
+    /// is an indefinite result, a QNaN with payload 0, which is also returned
+    /// by `into_inner`.
+    InvalidOperand,
+}
+
+impl<T> FloatResult<T> {
+    pub fn is_exact(&self) -> bool {
+        match self {
+            FloatResult::Exact(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl<T: fmt::Debug> FloatResult<T> {
@@ -447,10 +612,19 @@ impl<T: fmt::Debug> FloatResult<T> {
             panic!("called `unwrap_exact` on a {:?}", self);
         }
     }
+
+    pub fn unwrap_exact_or_rounded(self) -> T {
+        match self {
+            FloatResult::Exact(t) => t,
+            FloatResult::Rounded(t) => t,
+            _ => panic!("called `unwrap_exact_or_rounded` on a {:?}", self),
+        }
+    }
+    // FIXME: Try separating "exact-or-rounded" into its own enum
 }
 
 impl FloatResult<f32> {
-    /// Extract the (possibly rounded) result.
+    /// Extract the (possibly rounded or NaN-propagated) result.
     pub fn into_inner(self) -> f32 {
         match self {
             FloatResult::Exact(t) => t,
@@ -458,6 +632,7 @@ impl FloatResult<f32> {
             FloatResult::TooLarge => f32::INFINITY,
             FloatResult::TooSmall => f32::NEG_INFINITY,
             FloatResult::LostNaN(t) => t,
+            FloatResult::InvalidOperand => f32::NAN,
         }
     }
 }
@@ -471,6 +646,21 @@ impl FloatResult<f64> {
             FloatResult::TooLarge => f64::INFINITY,
             FloatResult::TooSmall => f64::NEG_INFINITY,
             FloatResult::LostNaN(t) => t,
+            FloatResult::InvalidOperand => f64::NAN,
+        }
+    }
+}
+
+impl FloatResult<f80> {
+    /// Extract the (possibly rounded) result.
+    pub fn into_inner(self) -> f80 {
+        match self {
+            FloatResult::Exact(t) => t,
+            FloatResult::Rounded(t) => t,
+            FloatResult::TooLarge => f80::INFINITY,
+            FloatResult::TooSmall => f80::NEG_INFINITY,
+            FloatResult::LostNaN(t) => t,
+            FloatResult::InvalidOperand => f80::NAN,
         }
     }
 }
@@ -485,13 +675,14 @@ pub enum Classified {
     /// All-zero exponent, significand `<1` (integer bit clear).
     ///
     /// The value is `s * m * 2^(-16382)` (where `s` is the sign and `m` the
-    /// fractional part of the significant).
+    /// fractional part of the significand).
     Denormal {
         sign: bool,
         /// The integer bit (bit #63). If set, this is a pseudo-denormal, which
-        /// isn't generated by the coprocessor. It should generally be `false`.
+        /// isn't generated by the coprocessor. It should generally be `false`,
+        /// but is respected in calculations when `true`.
         integer_bit: bool,
-        /// The fractional part of the significant (63 bits).
+        /// The fractional part of the significand (63 bits).
         fraction: u64,
     },
     /// All-one exponent, MSb of significand is 1, rest 0.
@@ -538,7 +729,7 @@ impl Classified {
 
     /// Converts this classified representation back into an equivalent `f80`.
     pub fn pack(&self) -> f80 {
-        let (sign, raw_exponent, significant): (bool, u16, u64) = match self {
+        let (sign, raw_exponent, significand): (bool, u16, u64) = match self {
             Classified::Zero { sign } => {
                 (*sign, 0, 0)
             }
@@ -563,20 +754,192 @@ impl Classified {
 
         let sign: u128 = (if sign { 1 } else { 0 }) << 79;
         let raw_exp: u128 = u128::from(raw_exponent & 0x7fff) << 64;
-        let significant: u128 = u128::from(significant);
+        let significand: u128 = u128::from(significand);
 
-        let raw = sign | raw_exp | significant;
+        let raw = sign | raw_exp | significand;
         //println!("pack: {:?} -> {:#020X}", self, raw);
         f80(raw)
     }
+
+    /// If `self` is neither a NaN, Infinity and Zero value, decomposes it into
+    /// its components.
+    pub fn decompose(&self) -> Option<Decomposed> {
+        let (sign, exponent, significand) = match self {
+            Classified::Normal { sign, exponent, fraction } => {
+                // Normalized floats always have the integer bit (#63) set
+                (*sign, *exponent, fraction | (1 << 63))
+            }
+            Classified::Denormal { sign, integer_bit, fraction } => {
+                // Denormals have a fixed exponent of -16382
+                let int = if *integer_bit { 1 << 63 } else { 0 };
+                (*sign, -16382, int | fraction)
+            }
+            Classified::Zero { sign } => {
+                (*sign, 0, 0)
+            }
+            _ => return None,
+        };
+
+        Some(Decomposed { sign, exponent, significand: significand.into() })
+    }
 }
 
-// `std::ops` behaves like all exceptions are masked and with default rounding.
-// Forward to more flexible ops for use by the x87 emulator.
+/// A normalized or denormal `f80` decomposed into its components (may be zero).
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct Decomposed {
+    pub sign: bool,
+    pub exponent: i16,
+    /// The significand, consisting of integer and fractional part. The low 63
+    /// bits are the fractional part, everything else is the integer part.
+    pub significand: u128,
+}
+
+impl Decomposed {
+    fn zero() -> Self {
+        Self {
+            sign: false,
+            exponent: 0,
+            significand: 0,
+        }
+    }
+
+    /// Normalizes the value, adjusting the significand so that bit #63 (the
+    /// canonical integer bit) is set.
+    ///
+    /// This might shift 1-bits out of the significand, in which case a rounded
+    /// result is returned. It will also adjust the exponent to compensate for
+    /// the shifted significand.
+    ///
+    /// If `self` is zero this does nothing as no normalization is necessary.
+    pub fn normalize(&self) -> FloatResult<Self> {
+        let mut normalized = *self;
+
+        if self.significand == 0 {
+            // Value is zero. Make the exponent sane (since it doesn't matter)
+            // and return.
+            normalized.exponent = 0;
+            return FloatResult::Exact(normalized);
+        }
+
+        // If normalized, we want bit #63 to be set, and all higher-valued bits
+        // to be unset. So we want there to be exactly 64 leading zeros.
+        let leading_zeros = self.significand.leading_zeros();
+        if leading_zeros > 64 {
+            // Too many zeros on the left, shift first 1-bit to the integer pos.
+            // This doesn't lose any bits (ie. doesn't round).
+            let shift = leading_zeros - 64;
+            normalized.exponent -= shift as i16;
+            normalized.significand = self.significand << shift;
+            assert!(normalized.is_normalized());
+
+            FloatResult::Exact(normalized)
+        } else if leading_zeros < 64 {
+            // There's a 1-bit too far to the left, shift it into the integer
+            // bit position.
+            let shift = 64 - leading_zeros;
+            normalized.exponent += shift as i16;
+            normalized.significand = self.significand >> shift;
+            assert!(normalized.is_normalized());
+
+            if self.significand == normalized.significand << shift {
+                FloatResult::Exact(normalized)
+            } else {
+                // Lost bits in the process
+                // FIXME: proper rounding?
+                FloatResult::Rounded(normalized)
+            }
+        } else {
+            // == 64 -> already normalized
+            FloatResult::Exact(normalized)
+        }
+    }
+
+    /// Adjust exponent and significant so that the exponent equals the given
+    /// `exponent` while `self` still refers to the same number.
+    pub fn adjust_exponent_to(&self, exponent: i16) -> FloatResult<Self> {
+        let mut adj = *self;
+        adj.exponent = exponent;
+
+        if exponent < self.exponent {
+            // smaller exponent, need to shift significand left to adjust
+            let shift = self.exponent - exponent;
+            adj.significand = if shift > 127 { 0 } else { self.significand << shift };
+            let back = if shift > 127 { 0 } else { adj.significand >> shift };
+            trace!(
+                "adj_exponent: prev exp={}; new exp={}; left by << {}; {:?} -> {:?}",
+                self.exponent, exponent, shift, self, adj
+            );
+
+            if self.significand == back {
+                FloatResult::Exact(adj)
+            } else {
+                // FIXME should this be `TooLarge`, logically?
+                FloatResult::Rounded(adj)
+            }
+        } else if exponent > self.exponent {
+            // larger exponent, need to shift significand right to adjust
+            let shift = exponent - self.exponent;
+            adj.significand = if shift > 127 { 0 } else { self.significand >> shift };
+            let back = if shift > 127 { 0 } else { adj.significand << shift };
+            trace!(
+                "adj_exponent: prev exp={}; new exp={}; right by >> {}; {:?} -> {:?}",
+                self.exponent, exponent, shift, self, adj
+            );
+
+            if self.significand == back {
+                FloatResult::Exact(adj)
+            } else {
+                FloatResult::Rounded(adj)
+            }
+        } else {
+            // already at the target exponent
+            FloatResult::Exact(adj)
+        }
+    }
+
+    /// Returns the significand (and implicitly the sign) of `self` as an
+    /// `i128`.
+    ///
+    /// Note that `-0.0` will return the same value as `+0.0`.
+    pub fn to_signed(&self) -> i128 {
+        assert_eq!(
+            self.significand & (1 << 127), 0,
+            "cannot turn significand {:#X} into signed value (too large)",
+            self.significand
+        );
+
+        let mut signed = self.significand as i128;
+        if self.sign {
+            signed = -signed;
+        }
+        signed
+    }
+
+    fn is_normalized(&self) -> bool {
+        self.significand.leading_zeros() == 64
+    }
+}
+
+impl fmt::Debug for Decomposed {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.sign {
+            write!(f, "-")?;
+        }
+
+        let int_part = self.significand >> 63;  // up to 65 bits (or more like 64)
+        let frac_part = self.significand & 0x7fff_ffff_ffff_ffff;
+        let frac = format!("{:063b}", frac_part);
+        let frac = frac.trim_right_matches('0');
+        let frac = if frac.is_empty() { "0" } else { &frac };
+        write!(f, "{:#b}.{}*2^{}", int_part, frac, self.exponent)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    extern crate env_logger;
 
     #[test]
     fn zero() {
@@ -605,5 +968,74 @@ mod tests {
             Classified::QNaN { sign: false, payload: 0 } => {},
             e => panic!("f80::NAN ({:?}) is {:?}", f80::NAN, e),
         }
+    }
+
+    #[test]
+    fn min_max_exp() {
+        assert_eq!(f80::MIN_EXPONENT, -16382);
+        assert_eq!(f80::MAX_EXPONENT, 16383);
+    }
+
+    #[test]
+    fn from_zero_f32() {
+        env_logger::try_init().ok();
+
+        let f32 = f32::from_bits(0);
+        let f8 = f80::from(f32);
+        let same = f8.to_f32();
+
+        assert_eq!(
+            f32.to_bits(), same.to_bits(),
+            "{}->{} ({:#010X}->{:#010X}) ({:?}={:?}={:?})",
+            f32, same, f32.to_bits(), same.to_bits(), f8, f8.decompose(),
+            f8.classify()
+        );
+    }
+
+    #[test]
+    fn from_tiny_f32() {
+        env_logger::try_init().ok();
+
+        let f32 = f32::from_bits(1);
+        let f8 = f80::from(f32);
+        let same = f8.to_f32();
+
+        assert_eq!(
+            f32.to_bits(), same.to_bits(),
+            "{}->{} ({:#010X}->{:#010X}) ({:?}={:?}={:?})",
+            f32, same, f32.to_bits(), same.to_bits(), f8, f8.decompose(),
+            f8.classify()
+        );
+    }
+
+    /// Ensure a normal f32 can be roundtripped via `from_f32` and `to_f32`.
+    #[test]
+    fn f32_roundtrip_normal() {
+        env_logger::try_init().ok();
+
+        let f = f32::from_bits(8388608);
+        let f8 = f80::from_f32(f);
+        let same = f8.to_f32_checked().unwrap_exact();
+
+        assert_eq!(
+            f.to_bits(), same.to_bits(),
+            "{}->{} ({:#010X}->{:#010X}) {:?}={:?}",
+            f, same, f.to_bits(), same.to_bits(), f8, f8.classify()
+        );
+    }
+
+    #[test]
+    fn f32_roundtrip_regression() {
+        env_logger::try_init().ok();
+
+        let f = f32::from_bits(1);
+        let f8 = f80::from_f32(f);
+        let same = f8.to_f32_checked().unwrap_exact();
+
+        assert_eq!(
+            f.to_bits(), same.to_bits(),
+            "{}->{} ({:#010X}->{:#010X}) {:?}={:?}",
+            f, same, f.to_bits(), same.to_bits(), f8, f8.classify()
+        );
     }
 }

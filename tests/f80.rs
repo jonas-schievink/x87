@@ -14,6 +14,8 @@ proptest! {
 }
 
 proptest! {
+    /// Tests that calling `.classify().pack()` on a value results in the same
+    /// value.
     #[test]
     fn f80_classify_roundtrip(bytes: [u8; 10]) {
         let f = f80::from_bytes(bytes);
@@ -25,6 +27,18 @@ proptest! {
                 let back_cls = back.classify();
                 panic!("{:?} != {:?} ({:?} vs. {:?})", f, back, classified, back_cls);
             }
+        }
+    }
+}
+
+proptest! {
+    /// Tests that `.decompose()` followed by `from_decomposed` yields the
+    /// original value.
+    #[test]
+    fn f80_decompose_roundtrip(raw: [u8; 10]) {
+        let f8 = f80::from_bytes(raw);
+        if let Some(decomp) = f8.decompose() {
+            f80::from_decomposed(decomp).unwrap_exact();
         }
     }
 }
@@ -52,11 +66,49 @@ proptest! {
 }
 
 proptest! {
+    /// Ensures that unary negation always flips the sign of a value.
     #[test]
     fn f80_neg(bytes: [u8; 10]) {
         let f = f80::from_bytes(bytes);
         let sign = f.is_sign_negative();
         assert_eq!((-f).is_sign_negative(), !sign);
+    }
+}
+
+proptest! {
+    #[test]
+    fn f80_eq(lhs_bits: u32, rhs_bits: u32) {
+        let (lhs, rhs) = (f32::from_bits(lhs_bits), f32::from_bits(rhs_bits));
+
+        let l80 = f80::from(lhs);
+        let r80 = f80::from(rhs);
+        if !l80.is_nan() {
+            assert_eq!(l80, l80);
+        }
+        if !r80.is_nan() {
+            assert_eq!(r80, r80);
+        }
+        let f32eq = lhs == rhs;
+        assert_eq!(l80 == r80, f32eq, "{:#010X}=={:#010X}:{}", lhs_bits, rhs_bits, f32eq);
+        let f32eq_reversed = rhs == lhs;
+        assert_eq!(r80 == l80, f32eq_reversed);
+    }
+}
+
+proptest! {
+    #[test]
+    fn add_f32(lhs_bits: u32, rhs_bits: u32) {
+        let (lhs, rhs) = (f32::from_bits(lhs_bits), f32::from_bits(rhs_bits));
+        let f32sum = lhs + rhs;
+        let f32bits = f32sum.to_bits();
+
+        let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+        let f80sum = l80 + r80;
+        let f80bits = f80sum.to_f32().to_bits();
+
+        println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f32sum.to_bits(), lhs, rhs, f32sum);
+        println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
+        prop_assert_eq!(f32bits, f80bits);
     }
 }
 
@@ -72,7 +124,12 @@ fn f32_f80_roundtrip_exhaustive() {
         let f80 = f80::from(f32);
         let same = f80.to_f32();
 
-        assert_eq!(f32.to_bits(), same.to_bits());
+        assert_eq!(
+            f32.to_bits(), same.to_bits(),
+            "{}->{} ({:#010X}->{:#010X}) ({:?}={:?}={:?})",
+            f32, same, f32.to_bits(), same.to_bits(), f80, f80.decompose(),
+            f80.classify()
+        );
     }
 }
 
