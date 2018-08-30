@@ -151,9 +151,9 @@ mod tests {
         addition(206028801, 1400897536);
     }
 
-    /// Produces a rounding error.
+    /// This only passes when round-to-nearest is implemented.
     #[test]
-    fn add_smoke_2() {
+    fn add_rounding_error() {
         addition(1358958057, 2977955840);
     }
 }

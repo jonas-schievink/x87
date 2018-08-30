@@ -10,12 +10,24 @@ use f80_mod::FloatResult;
 pub struct Decomposed {
     pub sign: bool,
     exponent: i16,
-    /// The significand, consisting of integer and fractional part. The low 63
-    /// bits are the fractional part, everything else is the integer part.
+    /// The fixed-point significand with additional guard, round and sticky
+    /// bits.
+    ///
+    /// The layout of this value looks like this:
+    ///
+    /// ```notrust
+    ///       +---------+----------+-------+-------+--------+
+    /// Bits: | 127-66  |   65-3   |   2   |   1   |    0   |
+    /// #Bits:|   62    |    63    |   1   |   1   |    1   |
+    /// What: | Integer | Fraction | guard | round | sticky |
+    ///       +---------+----------+-------+-------+--------+
+    /// ```
     significand: u128,
 }
 
 impl Decomposed {
+    const LEADING_ZEROS_WHEN_NORMALIZED: u32 = 64 - 3;  // 3 for the GRS bits
+
     pub fn zero() -> Self {
         Self {
             sign: false,
@@ -38,7 +50,7 @@ impl Decomposed {
         Self {
             sign,
             exponent,
-            significand: u128::from(significand),
+            significand: u128::from(significand) << 3,
         }
     }
 
@@ -46,15 +58,18 @@ impl Decomposed {
     /// an exponent.
     ///
     /// The `sign_mag` value defines the sign and the significand of the float.
-    /// The significand is the magnitude of the value, using the low 63 bits as
-    /// the fraction and the other bits as integer bits.
+    /// The significand is the magnitude of the value and also contains
+    /// additional bits used for correct rounding: The least significant 3 bits
+    /// are the GRS bits (guard, round, sticky), the 63 bits above those are the
+    /// fraction bits, and the bits above those are the integer portion of the
+    /// number.
     pub fn with_sign_magnitude_exponent(sign_mag: SignMagnitude, exponent: i16) -> Self {
         // FIXME using all bits not possible when we have the 3 rounding bits
         // (what happens when multiplying large values?)
         Self {
             sign: sign_mag.sign(),
             exponent,
-            significand: sign_mag.magnitude(),
+            significand: sign_mag.magnitude(),  // FIXME is GRS bit handling right?
         }
     }
 
@@ -63,12 +78,16 @@ impl Decomposed {
     }
 
     /// Returns `true` if `self` encodes exactly `0.0` or `-0.0`.
+    ///
+    /// If the significand would be rounded to 0, but isn't exactly 0 when
+    /// taking the excess bits into account, this will return `false`.
     pub fn is_zero(&self) -> bool {
         self.significand == 0
     }
 
     /// Returns the sign and significand as a `SignMagnitude` value.
     pub fn to_sign_magnitude(&self) -> SignMagnitude {
+        // FIXME should GRS bits be included here?
         SignMagnitude::new(self.sign, self.significand)
     }
 
@@ -93,24 +112,24 @@ impl Decomposed {
         // If normalized, we want bit #63 to be set, and all higher-valued bits
         // to be unset. So we want there to be exactly 64 leading zeros.
         let leading_zeros = self.significand.leading_zeros();
-        if leading_zeros > 64 {
+        if leading_zeros > Self::LEADING_ZEROS_WHEN_NORMALIZED {
             // Too many zeros on the left, shift first 1-bit to the integer pos.
             // This doesn't lose any bits (ie. doesn't round).
-            let shift = leading_zeros - 64;
+            let shift = leading_zeros - Self::LEADING_ZEROS_WHEN_NORMALIZED;
             normalized.exponent -= shift as i16;
-            normalized.significand = self.significand << shift;
+            normalized.significand = self.significand << shift; // FIXME shifts all GRS bits
             assert!(normalized.is_normalized());
 
             FloatResult::Exact(normalized)
-        } else if leading_zeros < 64 {
+        } else if leading_zeros < Self::LEADING_ZEROS_WHEN_NORMALIZED {
             // There's a 1-bit too far to the left, shift it into the integer
             // bit position.
-            let shift = 64 - leading_zeros;
+            let shift = Self::LEADING_ZEROS_WHEN_NORMALIZED - leading_zeros;
             normalized.exponent += shift as i16;
-            normalized.significand = self.significand >> shift;
+            normalized.significand = self.significand >> shift; // FIXME sticky
             assert!(normalized.is_normalized());
 
-            if self.significand == normalized.significand << shift {
+            if self.significand == normalized.significand << shift { // FIXME uuuh un-sticky or sth?
                 FloatResult::Exact(normalized)
             } else {
                 // Lost bits in the process
@@ -167,7 +186,7 @@ impl Decomposed {
     }
 
     fn is_normalized(&self) -> bool {
-        self.significand.leading_zeros() == 64
+        self.significand.leading_zeros() == Self::LEADING_ZEROS_WHEN_NORMALIZED
     }
 
     pub fn as_f32_significand(&self) -> FloatResult<u32> {
@@ -237,7 +256,7 @@ impl Decomposed {
         assert!(bits <= 64, "too many bits for a u64");
         // f80 has 63 fraction bits, we have more for the overflow calculations
 
-        let raw_fraction = self.significand & 0x7fff_ffff_ffff_ffff;
+        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
         let truncated = raw_fraction >> (63 - bits);
 
         // TODO rounding
@@ -249,7 +268,7 @@ impl Decomposed {
     }
 
     fn integer_bits(&self) -> u128 {
-        self.significand >> 63
+        self.significand >> (63 + 3)    // move GRS bits and fraction away
     }
 }
 
@@ -259,11 +278,17 @@ impl fmt::Debug for Decomposed {
             write!(f, "-")?;
         }
 
-        let int_part = self.significand >> 63;  // up to 65 bits (or more like 64)
-        let frac_part = self.significand & 0x7fff_ffff_ffff_ffff;
-        let frac = format!("{:063b}", frac_part);
+        let int_part = self.integer_bits();
+        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
+        let grs = self.significand & 0b111;
+        let frac = format!("{:063b}", raw_fraction);
         let frac = frac.trim_right_matches('0');
         let frac = if frac.is_empty() { "0" } else { &frac };
-        write!(f, "{:#b}.{}*2^{}", int_part, frac, self.exponent)
+        let frac_grs = if grs != 0 {
+            format!("{}|{:03b}", frac, grs)
+        } else {
+            frac.to_string()
+        };
+        write!(f, "{:#b}.{}*2^{}", int_part, frac_grs, self.exponent)
     }
 }
