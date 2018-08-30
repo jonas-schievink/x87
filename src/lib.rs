@@ -14,11 +14,14 @@
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate log;
 extern crate ieee754;
+extern crate core;
 
+mod decomposed;
 mod f80_algo;
 mod f80_mod;
 mod f80_ops;
 mod significand;
+mod sign_mag;
 
 pub use f80_mod::*;
 

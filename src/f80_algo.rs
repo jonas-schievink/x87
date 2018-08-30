@@ -5,6 +5,7 @@
 //! * http://pages.cs.wisc.edu/~markhill/cs354/Fall2008/notes/flpt.apprec.html
 
 use {f80, Classified, RoundingMode, FloatResult};
+use decomposed::Decomposed;
 use std::cmp;
 
 impl f80 {
@@ -39,15 +40,15 @@ impl f80 {
         // become very large, potentially losing highly significant bits. The
         // "solution" chosen here limits the amount of downscaling artificially.
         // FIXME How is this usually done?
-        let exp = cmp::max(l.exponent, r.exponent);
+        let exp = cmp::max(l.exponent(), r.exponent());
         //let exp = cmp::max(max_exp-15, cmp::min(l.exponent, r.exponent));
         let (l, r) = (l.adjust_exponent_to(exp), r.adjust_exponent_to(exp));
         let exact = l.is_exact() && r.is_exact();
         let (l, r) = (l.unwrap_exact_or_rounded(), r.unwrap_exact_or_rounded());
         trace!("adj exp={}; lhs={:?}; rhs={:?}", exp, l, r);
 
-        let sum = l.to_signed() + r.to_signed();
-        let sum = f80::with_signed_and_exponent(sum, exp);
+        let sum = l.to_sign_magnitude() + r.to_sign_magnitude();
+        let sum = f80::from_decomposed(Decomposed::with_sign_magnitude_exponent(sum, exp));
         trace!("sum decomp: {:?}", sum.into_inner().decompose());
 
         let exact = exact && sum.is_exact();
@@ -150,6 +151,7 @@ mod tests {
         addition(206028801, 1400897536);
     }
 
+    /// Produces a rounding error.
     #[test]
     fn add_smoke_2() {
         addition(1358958057, 2977955840);
