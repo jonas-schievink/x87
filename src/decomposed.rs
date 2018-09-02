@@ -2,8 +2,9 @@
 //! floating-point numbers.
 
 use sign_mag::SignMagnitude;
-use std::fmt;
 use f80_mod::FloatResult;
+use RoundingMode;
+use std::{fmt, ops};
 
 /// A normalized or denormal `f80` decomposed into its components (may be zero).
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -113,27 +114,29 @@ impl Decomposed {
         // to be unset. So we want there to be exactly 64 leading zeros.
         let leading_zeros = self.significand.leading_zeros();
         if leading_zeros > Self::LEADING_ZEROS_WHEN_NORMALIZED {
-            // Too many zeros on the left, shift first 1-bit to the integer pos.
+            // Too many zeros on the left, shift first 1-bit to the integer pos
+            // by adjusting exponent downwards.
             // This doesn't lose any bits (ie. doesn't round).
-            let shift = leading_zeros - Self::LEADING_ZEROS_WHEN_NORMALIZED;
-            normalized.exponent -= shift as i16;
-            normalized.significand = self.significand << shift; // FIXME shifts all GRS bits
+            let diff = (leading_zeros - Self::LEADING_ZEROS_WHEN_NORMALIZED) as i16;
+            let result = normalized.adjust_exponent_to(self.exponent - diff);
+            assert!(result.is_exact(), "unexpectedly lost bits during normalize");
+            normalized = result.unwrap_exact_or_rounded();
             assert!(normalized.is_normalized());
 
             FloatResult::Exact(normalized)
         } else if leading_zeros < Self::LEADING_ZEROS_WHEN_NORMALIZED {
             // There's a 1-bit too far to the left, shift it into the integer
-            // bit position.
-            let shift = Self::LEADING_ZEROS_WHEN_NORMALIZED - leading_zeros;
-            normalized.exponent += shift as i16;
-            normalized.significand = self.significand >> shift; // FIXME sticky
+            // bit position by adjusting exponent upwards.
+            let diff = (Self::LEADING_ZEROS_WHEN_NORMALIZED - leading_zeros) as i16;
+            let result = normalized.adjust_exponent_to(self.exponent + diff);
+            let exact = result.is_exact();
+            normalized = result.unwrap_exact_or_rounded();
             assert!(normalized.is_normalized());
 
-            if self.significand == normalized.significand << shift { // FIXME uuuh un-sticky or sth?
+            if exact {
                 FloatResult::Exact(normalized)
             } else {
                 // Lost bits in the process
-                // FIXME: proper rounding?
                 FloatResult::Rounded(normalized)
             }
         } else {
@@ -225,7 +228,7 @@ impl Decomposed {
         }
     }
 
-    pub fn as_f80_significant(&self) -> FloatResult<u64> {
+    pub fn as_f80_significand(&self) -> FloatResult<u64> {
         let fraction = self.as_f80_fraction();
         let exact = fraction.is_exact();
         let fraction = fraction.unwrap_exact_or_rounded();
@@ -290,5 +293,105 @@ impl fmt::Debug for Decomposed {
             frac.to_string()
         };
         write!(f, "{:#b}.{}*2^{}", int_part, frac_grs, self.exponent)
+    }
+}
+
+// TODO: Make new trimmed down `Significand` type private to this module
+
+#[derive(PartialEq, Clone, Copy)]
+struct Significand {
+    /// The fixed-point significand with additional guard, round and sticky
+    /// bits.
+    ///
+    /// The layout of this value looks like this:
+    ///
+    /// ```notrust
+    ///       +---------+----------+-------+-------+--------+
+    /// Bits: | 127-66  |   65-3   |   2   |   1   |    0   |
+    /// #Bits:|   62    |    63    |   1   |   1   |    1   |
+    /// What: | Integer | Fraction | guard | round | sticky |
+    ///       +---------+----------+-------+-------+--------+
+    /// ```
+    significand: u128,
+}
+
+impl Significand {
+    fn integer_bits(&self) -> u128 {
+        self.significand >> (63 + 3)    // move GRS bits and fraction away
+    }
+
+    fn sticky_bit(&self) -> u128 {
+        self.significand & 1
+    }
+
+    /// Rounds the fraction bits to get the given number of fraction bits.
+    ///
+    /// This is used for converting the extended significand (with guard, round
+    /// and sticky bits) to the significand to use in the resulting `f80`. It
+    /// can also produce smaller outputs for use in `f32` or `f64`.
+    ///
+    /// Note that this will not return any integer bits.
+    fn reduced_fraction(&self, bits: u8, _sign: bool, _rounding: RoundingMode) -> FloatResult<u64> {
+        assert!(bits <= 64, "too many bits for a u64");
+        // f80 has 63 fraction bits, we have more for the overflow calculations
+
+        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
+        let truncated = raw_fraction >> (63 - bits);
+
+        // TODO rounding
+        if truncated << (63 - bits) == raw_fraction {
+            FloatResult::Exact(truncated as u64)
+        } else {
+            FloatResult::Rounded(truncated as u64)
+        }
+    }
+}
+
+impl fmt::Debug for Significand {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let int_part = self.integer_bits();
+        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
+        let grs = self.significand & 0b111;
+        let frac = format!("{:063b}", raw_fraction);
+        let frac = frac.trim_right_matches('0');
+        let frac = if frac.is_empty() { "0" } else { &frac };
+        let frac_grs = if grs != 0 {
+            format!("{}|{:03b}", frac, grs)
+        } else {
+            frac.to_string()
+        };
+        write!(f, "{:#b}.{}", int_part, frac_grs)
+    }
+}
+
+/// Left-shifts preserve the sticky bit and shift it around.
+// FIXME is this right?
+impl ops::Shl<u16> for Significand {
+    type Output = Self;
+
+    fn shl(self, rhs: u16) -> Self {
+        let sticky = self.sticky_bit();
+        let result = self.significand << rhs;
+        Significand {
+            significand: result | sticky,
+        }
+    }
+}
+
+/// Right-shifts preserve and update the sticky bits with the `OR` of all bits
+/// shifted out.
+impl ops::Shr<u16> for Significand {
+    type Output = Self;
+
+    fn shr(self, rhs: u16) -> Self {
+        let sticky = self.sticky_bit() != 0;
+        let mask = (1 << rhs) - 1;
+        let lost_bits = self.significand & mask;
+        let sticky = sticky || lost_bits != 0;
+        let sticky = if sticky { 1 } else { 0 };
+        let result = self.significand >> rhs;
+        Significand {
+            significand: result | sticky,
+        }
     }
 }

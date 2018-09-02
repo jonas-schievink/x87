@@ -143,7 +143,7 @@ impl f80 {
         if decomp.exponent() >= f80::MIN_EXPONENT && decomp.exponent() <= f80::MAX_EXPONENT {
             let exp = (decomp.exponent() + Self::EXPONENT_BIAS) as u128;
             assert_eq!(exp & 0x8000, 0, "MSb set");
-            let significand = decomp.as_f80_significant();
+            let significand = decomp.as_f80_significand();
             let exact = exact && significand.is_exact();
             let significand = u128::from(significand.unwrap_exact_or_rounded());
             let exp = exp << 64;
