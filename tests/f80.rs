@@ -58,10 +58,8 @@ proptest! {
     fn f80_f64_roundtrip(f: u64) {
         let f = f64::from_bits(f);
         let f80 = f80::from_f64(f);
-        let same = f80.to_f64_checked();
-        println!("{}->{:?} ({:#010X}->{:#010X}) {:?}={:?}", f, same, f.to_bits(), same.into_inner().to_bits(), f80, f80.classify());
-        let same = same.unwrap_exact();
-        assert_eq!(f.to_bits(), same.to_bits());
+        let same = f80.to_f64_checked().unwrap_exact();
+        assert_eq!(f.to_bits(), same.to_bits(), "{}->{} ({:#010X}->{:#010X}) {:?}={:?}", f, same, f.to_bits(), same.to_bits(), f80, f80.classify());
     }
 }
 
@@ -109,6 +107,23 @@ proptest! {
         println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f32sum.to_bits(), lhs, rhs, f32sum);
         println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
         prop_assert_eq!(f32bits, f80bits);
+    }
+}
+
+proptest! {
+    #[test]
+    fn add_f64(lhs_bits: u64, rhs_bits: u64) {
+        let (lhs, rhs) = (f64::from_bits(lhs_bits), f64::from_bits(rhs_bits));
+        let f64sum = lhs + rhs;
+        let f64bits = f64sum.to_bits();
+
+        let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+        let f80sum = l80 + r80;
+        let f80bits = f80sum.to_f64().to_bits();
+
+        println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f64sum.to_bits(), lhs, rhs, f64sum);
+        println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
+        prop_assert_eq!(f64bits, f80bits);
     }
 }
 

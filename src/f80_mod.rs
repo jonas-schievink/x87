@@ -83,18 +83,11 @@ impl f80 {
             }
             0xFF => match significand {
                 0 => return if sign { Self::NEG_INFINITY } else { Self::INFINITY },
-                _ => match significand & (1 << 22) {
-                    0 => return Classified::NaN {
-                        sign,
-                        signaling: true,
-                        payload: u64::from(significand),
-                    }.pack(),
-                    _ => return Classified::NaN {
-                        sign,
-                        signaling: false,
-                        payload: u64::from(significand & !(1 << 22)),
-                    }.pack(),
-                }
+                _ => return Classified::NaN {
+                    sign,
+                    signaling: significand & (1 << 22) == 0,
+                    payload: u64::from(significand & !(1 << 22)),
+                }.pack(),
             }
             _ => Decomposed::new(sign, exp, (1 << 63) | f80_fraction),  // normal
         };
@@ -106,32 +99,28 @@ impl f80 {
     pub fn from_f64(f: f64) -> Self {
         let (sign, exp, significand) = f.decompose();
         let raw_exp = f.decompose_raw().1;
-        //println!("from {} ({:#010X}) sign={} exp={} raw_exp={:#04X} significand={:#08X}", f, f.to_bits(), sign, exp, raw_exp, significand);
+        trace!("from_f64: {} ({:?}, {:#010X}) sign={} exp={} raw_exp={:#04X} significand={:#08X}", f, f.classify(), f.to_bits(), sign, exp, raw_exp, significand);
 
         let f80_fraction = significand << 11;    // 52-bit -> 63-bit
-        let cls = match raw_exp {
-            0x000 => match significand {
-                0 => Classified::Zero { sign },
-                _ => Classified::Denormal { sign, integer_bit: false, fraction: f80_fraction },
+        let decomp = match raw_exp {
+            0x00 => match significand {
+                0 => Decomposed::zero(),
+                _ => {
+                    // f64 denormal, exponent is -1022, integer bit unset.
+                    Decomposed::new(sign, -1022, f80_fraction)
+                },
             }
-            0x7FF => match significand {
-                0 => Classified::Inf { sign },
-                _ => match significand & (1 << 51) {
-                    0 => Classified::NaN {
-                        sign,
-                        signaling: true,
-                        payload: u64::from(significand),
-                    },
-                    _ => Classified::NaN {
-                        sign,
-                        signaling: false,
-                        payload: u64::from(significand & !(1 << 51)),
-                    },
-                }
+            0b111_11111111 => match significand {
+                0 => return if sign { Self::NEG_INFINITY } else { Self::INFINITY },
+                _ => return Classified::NaN {
+                    sign,
+                    signaling: significand & (1 << 51) == 0,
+                    payload: u64::from(significand & !(1 << 51)),
+                }.pack(),
             }
-            _ => Classified::Normal { sign, exponent: exp, fraction: f80_fraction },
+            _ => Decomposed::new(sign, exp, (1 << 63) | f80_fraction),  // normal
         };
-        cls.pack()
+        Self::from_decomposed(decomp).unwrap_exact()
     }
 
     /// Creates a normal, denormal, or zero `f80` from its decomposed
@@ -282,7 +271,7 @@ impl f80 {
                     // The `fraction` bits might end up being all zero. In that
                     // case, the f32 will encode zero, which is correct here.
                     let sign = if decomp.sign { 0x8000_0000 } else { 0 };
-                    let result = f32::from_bits(sign | fraction as u32);
+                    let result = f32::from_bits(sign | fraction);
                     if exact {
                         FloatResult::Exact(result)
                     } else {
@@ -312,7 +301,7 @@ impl f80 {
             Classified::Inf { sign } => {
                 FloatResult::Exact(if sign { -1.0/0.0 } else { 1.0/0.0 })
             },
-            Classified::Denormal { sign, integer_bit: _, fraction } => {
+            /*Classified::Denormal { sign, integer_bit: _, fraction } => {
                 let raw_exp = 0;
                 let frac = (fraction >> 11) & 0xf_ffff_ffff_ffff; // truncate fraction to the upper 52 bits
                 let result = f64::recompose_raw(sign, raw_exp, frac);
@@ -340,7 +329,7 @@ impl f80 {
                         FloatResult::TooLarge
                     },
                 }
-            }
+            }*/
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
             // the significand as an "is_quiet" flag. x87 does this and it
             // matches up with using a zero-payload SNaN for Infinities.
@@ -360,6 +349,59 @@ impl f80 {
                     FloatResult::Exact(result)
                 } else {
                     FloatResult::LostNaN(result)
+                }
+            }
+            _ => {
+                let decomp = self.decompose().unwrap().normalize();
+                let exact = decomp.is_exact();
+                let decomp = decomp.unwrap_exact_or_rounded();
+                trace!("finite: {:?}; exact={}", decomp, exact);
+
+                // If the exponent is too small for f64, try encoding as a
+                // denormal, then fall back to rounding to 0. If it's too large,
+                // we've hit +/-Inf.
+                if decomp.exponent() >= -1022 && decomp.exponent() <= 1023 {
+                    // Fits in a normal f64, but significand might need
+                    // rounding. Go from 63 fraction bits to 52:
+                    let fraction = decomp.as_f64_significand();
+                    let exact = fraction.is_exact();
+                    let fraction = fraction.unwrap_exact_or_rounded();
+                    let result = f64::recompose(decomp.sign, decomp.exponent(), fraction);
+                    trace!("normal; exp={}; frac={:X}; exact={}; result={}", decomp.exponent(), fraction, exact, result);
+                    if exact {
+                        FloatResult::Exact(result)
+                    } else {
+                        FloatResult::Rounded(result)
+                    }
+                } else if decomp.exponent() < -1022 {
+                    // Too close to 0.0 to be a normal float. Try denormal,
+                    // rounding to zero if that also doesn't fit.
+                    // Denormals need an exponent of -1022:
+                    let decomp = decomp.adjust_exponent_to(-1022);
+                    let exact = exact && decomp.is_exact();
+                    let decomp = decomp.unwrap_exact_or_rounded();
+                    // Extract the 52 fraction bits we have left:
+                    let fraction = decomp.as_f64_significand();
+                    let exact = exact && fraction.is_exact();
+                    let fraction = fraction.unwrap_exact_or_rounded();
+                    trace!("needs denormal. adj={:?}; exact={}", decomp, exact);
+                    // The `fraction` bits might end up being all zero. In that
+                    // case, the f64 will encode zero, which is correct here.
+                    let sign = if decomp.sign { 0x8000_0000_0000_0000 } else { 0 };
+                    let result = f64::from_bits(sign | fraction);
+                    if exact {
+                        FloatResult::Exact(result)
+                    } else {
+                        FloatResult::Rounded(result)
+                    }
+                } else {
+                    // Exponent too large. Number too large or small for f64
+                    // range. "Round" to +/-Inf.
+                    if decomp.sign {
+                        FloatResult::TooSmall
+                    } else {
+                        FloatResult::TooLarge
+                    }
                 }
             }
         }
@@ -798,13 +840,12 @@ mod tests {
         assert_eq!(f80::MAX_EXPONENT, 16383);
     }
 
-    #[test]
-    fn from_zero_f32() {
+    fn test_from_f32(bits: u32) {
         env_logger::try_init().ok();
 
-        let f32 = f32::from_bits(0);
+        let f32 = f32::from_bits(bits);
         let f8 = f80::from(f32);
-        let same = f8.to_f32();
+        let same = f8.to_f32_checked().unwrap_exact();
 
         assert_eq!(
             f32.to_bits(), same.to_bits(),
@@ -815,49 +856,43 @@ mod tests {
     }
 
     #[test]
+    fn from_zero_f32() {
+        test_from_f32(0);
+    }
+
+    #[test]
     fn from_tiny_f32() {
-        env_logger::try_init().ok();
-
-        let f32 = f32::from_bits(1);
-        let f8 = f80::from(f32);
-        let same = f8.to_f32();
-
-        assert_eq!(
-            f32.to_bits(), same.to_bits(),
-            "{}->{} ({:#010X}->{:#010X}) ({:?}={:?}={:?})",
-            f32, same, f32.to_bits(), same.to_bits(), f8, f8.decompose(),
-            f8.classify()
-        );
+        test_from_f32(1);
     }
 
     /// Ensure a normal f32 can be roundtripped via `from_f32` and `to_f32`.
     #[test]
     fn f32_roundtrip_normal() {
+        test_from_f32(8388608);
+    }
+
+    fn test_from_f64(bits: u64) {
         env_logger::try_init().ok();
 
-        let f = f32::from_bits(8388608);
-        let f8 = f80::from_f32(f);
-        let same = f8.to_f32_checked().unwrap_exact();
+        let f64 = f64::from_bits(bits);
+        let f8 = f80::from(f64);
+        let same = f8.to_f64_checked().unwrap_exact();
 
         assert_eq!(
-            f.to_bits(), same.to_bits(),
-            "{}->{} ({:#010X}->{:#010X}) {:?}={:?}",
-            f, same, f.to_bits(), same.to_bits(), f8, f8.classify()
+            f64.to_bits(), same.to_bits(),
+            "{}->{} ({:#010X}->{:#010X}) ({:?}={:?}={:?})",
+            f64, same, f64.to_bits(), same.to_bits(), f8, f8.decompose(),
+            f8.classify()
         );
     }
 
     #[test]
-    fn f32_roundtrip_regression() {
-        env_logger::try_init().ok();
+    fn f64_roundtrip_bug_1() {
+        test_from_f64(9223372036854775809);
+    }
 
-        let f = f32::from_bits(1);
-        let f8 = f80::from_f32(f);
-        let same = f8.to_f32_checked().unwrap_exact();
-
-        assert_eq!(
-            f.to_bits(), same.to_bits(),
-            "{}->{} ({:#010X}->{:#010X}) {:?}={:?}",
-            f, same, f.to_bits(), same.to_bits(), f8, f8.classify()
-        );
+    #[test]
+    fn f64_roundtrip_bug_2() {
+        test_from_f64(9218868437227405312);
     }
 }

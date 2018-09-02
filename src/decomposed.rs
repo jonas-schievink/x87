@@ -192,7 +192,7 @@ impl Decomposed {
         }
     }
 
-    fn as_f64_significand(&self) -> FloatResult<u64> {
+    pub fn as_f64_significand(&self) -> FloatResult<u64> {
         // 52 fraction bits
         let result = self.reduced_fraction(52);
         let exact = result.is_exact();
