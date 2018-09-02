@@ -309,25 +309,55 @@ impl Significand {
         self.significand & 1
     }
 
-    /// Rounds the fraction bits to get the given number of fraction bits.
+    /// Rounds the fraction bits to get the given number of fraction bits
+    /// (up to 64).
     ///
     /// This is used for converting the extended significand (with guard, round
     /// and sticky bits) to the significand to use in the resulting `f80`. It
     /// can also produce smaller outputs for use in `f32` or `f64`.
     ///
     /// Note that this will not return any integer bits.
-    fn reduced_fraction(&self, bits: u8, _sign: bool, _rounding: RoundingMode) -> FloatResult<u64> {
+    fn reduced_fraction(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> FloatResult<u64> {
         assert!(bits <= 64, "too many bits for a u64");
         // f80 has 63 fraction bits, we have more for the overflow calculations
 
         let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
+        // obtain the bits we're about to drop on the floor and build the actual GRS bits
+        let g_mask = 1 << (63 - bits + 2);
+        let r_mask = 1 << (63 - bits + 1);
+        let s_mask = (1 << (63 - bits)) - 1;
+        // now calculate the "real" GRS bits to use for the reduction
+        let guard = self.significand & g_mask != 0;
+        let round = self.significand & r_mask != 0;
+        let sticky = self.significand & s_mask != 0;
+
         let truncated = raw_fraction >> (63 - bits);
 
-        // TODO rounding
-        if truncated << (63 - bits) == raw_fraction {
-            FloatResult::Exact(truncated as u64)
+        // Now we can adjust the truncated value using the GR and S bits.
+        let rounded = match rounding {
+            RoundingMode::Zero => truncated,
+            RoundingMode::Nearest => {
+                if guard {
+                    // Need to round up (towards larger magnitude) or to even
+                    if round || sticky {
+                        // Any bits below the guard bit set => round up
+                        truncated + 1
+                    } else {
+                        // Exactly halfway between two numbers => round to even
+                        truncated & !1
+                    }
+                } else {
+                    // Round down (towards lower magnitude / towards 0)
+                    truncated
+                }
+            }
+            _ => unimplemented!(),  // TODO rounding
+        };
+
+        if rounded << (63 - bits) == raw_fraction && !guard && !round && !sticky {
+            FloatResult::Exact(rounded as u64)
         } else {
-            FloatResult::Rounded(truncated as u64)
+            FloatResult::Rounded(rounded as u64)
         }
     }
 }
