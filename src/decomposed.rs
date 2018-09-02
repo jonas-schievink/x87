@@ -11,19 +11,7 @@ use std::{fmt, ops};
 pub struct Decomposed {
     pub sign: bool,
     exponent: i16,
-    /// The fixed-point significand with additional guard, round and sticky
-    /// bits.
-    ///
-    /// The layout of this value looks like this:
-    ///
-    /// ```notrust
-    ///       +---------+----------+-------+-------+--------+
-    /// Bits: | 127-66  |   65-3   |   2   |   1   |    0   |
-    /// #Bits:|   62    |    63    |   1   |   1   |    1   |
-    /// What: | Integer | Fraction | guard | round | sticky |
-    ///       +---------+----------+-------+-------+--------+
-    /// ```
-    significand: u128,
+    significand: Significand,
 }
 
 impl Decomposed {
@@ -33,7 +21,7 @@ impl Decomposed {
         Self {
             sign: false,
             exponent: 0,
-            significand: 0,
+            significand: Significand::zero(),
         }
     }
 
@@ -51,7 +39,7 @@ impl Decomposed {
         Self {
             sign,
             exponent,
-            significand: u128::from(significand) << 3,
+            significand: Significand::from(significand),
         }
     }
 
@@ -70,7 +58,7 @@ impl Decomposed {
         Self {
             sign: sign_mag.sign(),
             exponent,
-            significand: sign_mag.magnitude(),  // FIXME is GRS bit handling right?
+            significand: Significand::from_raw(sign_mag.magnitude()),
         }
     }
 
@@ -83,13 +71,13 @@ impl Decomposed {
     /// If the significand would be rounded to 0, but isn't exactly 0 when
     /// taking the excess bits into account, this will return `false`.
     pub fn is_zero(&self) -> bool {
-        self.significand == 0
+        self.significand.is_exactly_zero()
     }
 
     /// Returns the sign and significand as a `SignMagnitude` value.
     pub fn to_sign_magnitude(&self) -> SignMagnitude {
         // FIXME should GRS bits be included here?
-        SignMagnitude::new(self.sign, self.significand)
+        SignMagnitude::new(self.sign, self.significand.raw())
     }
 
     /// Normalizes the value, adjusting the significand so that bit #63 (the
@@ -103,7 +91,7 @@ impl Decomposed {
     pub fn normalize(&self) -> FloatResult<Self> {
         let mut normalized = *self;
 
-        if self.significand == 0 {
+        if self.significand.is_exactly_zero() {
             // Value is zero. Make the exponent sane (since it doesn't matter)
             // and return.
             normalized.exponent = 0;
@@ -112,7 +100,7 @@ impl Decomposed {
 
         // If normalized, we want bit #63 to be set, and all higher-valued bits
         // to be unset. So we want there to be exactly 64 leading zeros.
-        let leading_zeros = self.significand.leading_zeros();
+        let leading_zeros = self.significand.raw().leading_zeros();
         if leading_zeros > Self::LEADING_ZEROS_WHEN_NORMALIZED {
             // Too many zeros on the left, shift first 1-bit to the integer pos
             // by adjusting exponent downwards.
@@ -153,9 +141,9 @@ impl Decomposed {
 
         if exponent < self.exponent {
             // smaller exponent, need to shift significand left to adjust
-            let shift = self.exponent - exponent;
-            adj.significand = if shift > 127 { 0 } else { self.significand << shift };
-            let back = if shift > 127 { 0 } else { adj.significand >> shift };
+            let shift = (self.exponent - exponent) as u16;
+            adj.significand = self.significand << shift;
+            let back = adj.significand >> shift;
             trace!(
                 "adj_exponent: prev exp={}; new exp={}; left by << {}; {:?} -> {:?}",
                 self.exponent, exponent, shift, self, adj
@@ -169,9 +157,9 @@ impl Decomposed {
             }
         } else if exponent > self.exponent {
             // larger exponent, need to shift significand right to adjust
-            let shift = exponent - self.exponent;
-            adj.significand = if shift > 127 { 0 } else { self.significand >> shift };
-            let back = if shift > 127 { 0 } else { adj.significand << shift };
+            let shift = (exponent - self.exponent) as u16;
+            adj.significand = self.significand >> shift;
+            let back = adj.significand << shift;
             trace!(
                 "adj_exponent: prev exp={}; new exp={}; right by >> {}; {:?} -> {:?}",
                 self.exponent, exponent, shift, self, adj
@@ -189,7 +177,7 @@ impl Decomposed {
     }
 
     fn is_normalized(&self) -> bool {
-        self.significand.leading_zeros() == Self::LEADING_ZEROS_WHEN_NORMALIZED
+        self.significand.raw().leading_zeros() == Self::LEADING_ZEROS_WHEN_NORMALIZED
     }
 
     pub fn as_f32_significand(&self) -> FloatResult<u32> {
@@ -256,22 +244,12 @@ impl Decomposed {
     ///
     /// Note that this will not return any integer bits.
     fn reduced_fraction(&self, bits: u8) -> FloatResult<u64> {
-        assert!(bits <= 64, "too many bits for a u64");
-        // f80 has 63 fraction bits, we have more for the overflow calculations
-
-        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
-        let truncated = raw_fraction >> (63 - bits);
-
-        // TODO rounding
-        if truncated << (63 - bits) == raw_fraction {
-            FloatResult::Exact(truncated as u64)
-        } else {
-            FloatResult::Rounded(truncated as u64)
-        }
+        // FIXME store and use real rounding mode
+        self.significand.reduced_fraction(bits, self.sign, RoundingMode::Nearest)
     }
 
     fn integer_bits(&self) -> u128 {
-        self.significand >> (63 + 3)    // move GRS bits and fraction away
+        self.significand.integer_bits()
     }
 }
 
@@ -281,24 +259,13 @@ impl fmt::Debug for Decomposed {
             write!(f, "-")?;
         }
 
-        let int_part = self.integer_bits();
-        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
-        let grs = self.significand & 0b111;
-        let frac = format!("{:063b}", raw_fraction);
-        let frac = frac.trim_right_matches('0');
-        let frac = if frac.is_empty() { "0" } else { &frac };
-        let frac_grs = if grs != 0 {
-            format!("{}|{:03b}", frac, grs)
-        } else {
-            frac.to_string()
-        };
-        write!(f, "{:#b}.{}*2^{}", int_part, frac_grs, self.exponent)
+        write!(f, "{:?}*2^{}", self.significand, self.exponent)
     }
 }
 
 // TODO: Make new trimmed down `Significand` type private to this module
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 struct Significand {
     /// The fixed-point significand with additional guard, round and sticky
     /// bits.
@@ -316,6 +283,24 @@ struct Significand {
 }
 
 impl Significand {
+    fn zero() -> Self {
+        Self {
+            significand: 0,
+        }
+    }
+
+    fn from_raw(significand: u128) -> Self {
+        Self { significand }
+    }
+
+    fn raw(&self) -> u128 {
+        self.significand
+    }
+
+    fn is_exactly_zero(&self) -> bool {
+        self.significand == 0
+    }
+
     fn integer_bits(&self) -> u128 {
         self.significand >> (63 + 3)    // move GRS bits and fraction away
     }
@@ -347,6 +332,14 @@ impl Significand {
     }
 }
 
+impl From<u64> for Significand {
+    fn from(v: u64) -> Self {
+        Self {
+            significand: u128::from(v) << 3,    // GRS bits cleared
+        }
+    }
+}
+
 impl fmt::Debug for Significand {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let int_part = self.integer_bits();
@@ -371,7 +364,7 @@ impl ops::Shl<u16> for Significand {
 
     fn shl(self, rhs: u16) -> Self {
         let sticky = self.sticky_bit();
-        let result = self.significand << rhs;
+        let result = if rhs > 127 { 0 } else { self.significand << rhs };
         Significand {
             significand: result | sticky,
         }
@@ -385,11 +378,11 @@ impl ops::Shr<u16> for Significand {
 
     fn shr(self, rhs: u16) -> Self {
         let sticky = self.sticky_bit() != 0;
-        let mask = (1 << rhs) - 1;
+        let mask = if rhs > 127 { !0 } else { (1 << rhs) - 1 };
         let lost_bits = self.significand & mask;
         let sticky = sticky || lost_bits != 0;
         let sticky = if sticky { 1 } else { 0 };
-        let result = self.significand >> rhs;
+        let result = if rhs > 127 { 0 } else { self.significand >> rhs };
         Significand {
             significand: result | sticky,
         }
