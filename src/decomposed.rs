@@ -323,13 +323,15 @@ impl Significand {
 
         let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
         // obtain the bits we're about to drop on the floor and build the actual GRS bits
-        let g_mask = 1 << (63 - bits + 2);
-        let r_mask = 1 << (63 - bits + 1);
-        let s_mask = (1 << (63 - bits)) - 1;
+        let (g_pos, r_pos) = (63 - bits + 2, 63 - bits + 1);
+        let g_mask = 1 << g_pos;
+        let r_mask = 1 << r_pos;
+        let s_mask = (1 << (63 - bits + 1)) - 1;
         // now calculate the "real" GRS bits to use for the reduction
         let guard = self.significand & g_mask != 0;
         let round = self.significand & r_mask != 0;
         let sticky = self.significand & s_mask != 0;
+        trace!("reduced_fraction: self={:?}, bits={}, dropped={}, g_pos={}, r_pos={}, grs={},{},{}", self, bits, 63-bits, g_pos, r_pos, guard, round, sticky);
 
         let truncated = raw_fraction >> (63 - bits);
 
@@ -344,7 +346,13 @@ impl Significand {
                         truncated + 1
                     } else {
                         // Exactly halfway between two numbers => round to even
-                        truncated & !1
+                        if truncated & 1 != 0 {
+                            // xxx1.100 -> round up
+                            truncated + 1
+                        } else {
+                            // xxx0.100 -> round down
+                            truncated
+                        }
                     }
                 } else {
                     // Round down (towards lower magnitude / towards 0)
@@ -354,6 +362,7 @@ impl Significand {
             _ => unimplemented!(),  // TODO rounding
         };
 
+        trace!("reduced_fraction: -> {:#b}", rounded);
         if rounded << (63 - bits) == raw_fraction && !guard && !round && !sticky {
             FloatResult::Exact(rounded as u64)
         } else {

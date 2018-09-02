@@ -169,4 +169,22 @@ mod tests {
     fn add_wrong_nan_handling() {
         addition(2139095041, 0);
     }
+
+    /// This failed because the ties-to-even case used to just do
+    /// `truncated & !1`, which always rounds DOWN to an even significand. But
+    /// in case we get a `xxx1.100`, we want to round UP, not down.
+    #[test]
+    fn add_wrong_even_rounding() {
+        addition(552910884, 572284665);
+    }
+
+    /// This test failed because not all bits were incorporated into the sticky
+    /// bit calculation, erroneously rounding down instead of up.
+    #[test]
+    fn add_wrong_sticky_computation() {
+        addition(561687281, 574749429);
+    }
+
+    // Most of these were found by proptest and extracted to ease debugging.
+    // Thank you proptest!
 }
