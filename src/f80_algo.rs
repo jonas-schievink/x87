@@ -67,13 +67,19 @@ impl f80 {
             _ => return Err(FloatResult::InvalidOperand),
         };
 
-        match (&lhs_c, &rhs_c) {
-            // Propagate NaNs, preferably the left one
-            (Classified::QNaN {..}, _) |
-            (Classified::SNaN {..}, _) => Err(FloatResult::Exact(lhs)),
-            (_, Classified::QNaN {..}) |
-            (_, Classified::SNaN {..}) => Err(FloatResult::Exact(rhs)),
-            _ => Ok((lhs_c, rhs_c)),
+        match (lhs_c, rhs_c) {
+            // Propagate NaNs, preferably the left one, turning signaling ones
+            // into quiet ones.
+            (Classified::NaN {sign, payload, signaling: _}, _) |
+            (_, Classified::NaN {sign, payload, signaling: _}) => {
+                let cls = Classified::NaN {
+                    sign,
+                    signaling: false,
+                    payload,
+                };
+                Err(FloatResult::Exact(cls.pack()))
+            },
+            (lhs_c, rhs_c) => Ok((lhs_c, rhs_c)),
         }
     }
 }
@@ -155,5 +161,12 @@ mod tests {
     #[test]
     fn add_rounding_error() {
         addition(1358958057, 2977955840);
+    }
+
+    /// This one popped up randomly while implementing round-to-nearest, but is
+    /// independent of that.
+    #[test]
+    fn add_wrong_nan_handling() {
+        addition(2139095041, 0);
     }
 }

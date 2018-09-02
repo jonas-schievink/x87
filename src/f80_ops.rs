@@ -30,10 +30,8 @@ impl<'a> ops::Neg for &'a f80 {
 impl PartialEq for f80 {
     fn eq(&self, other: &Self) -> bool {
         match (self.classify(), other.classify()) {
-            (Classified::SNaN {..}, _) => false,
-            (Classified::QNaN {..}, _) => false,
-            (_, Classified::SNaN {..}) => false,
-            (_, Classified::QNaN {..}) => false,
+            (Classified::NaN {..}, _) => false,
+            (_, Classified::NaN {..}) => false,
 
             // -0.0 == -0.0 == 0.0 == 0.0
             (Classified::Zero { .. }, Classified::Zero { .. }) => true,

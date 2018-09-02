@@ -84,8 +84,16 @@ impl f80 {
             0xFF => match significand {
                 0 => return if sign { Self::NEG_INFINITY } else { Self::INFINITY },
                 _ => match significand & (1 << 22) {
-                    0 => return Classified::SNaN { sign, payload: u64::from(significand) }.pack(),
-                    _ => return Classified::QNaN { sign, payload: u64::from(significand & !(1 << 22)) }.pack(),
+                    0 => return Classified::NaN {
+                        sign,
+                        signaling: true,
+                        payload: u64::from(significand),
+                    }.pack(),
+                    _ => return Classified::NaN {
+                        sign,
+                        signaling: false,
+                        payload: u64::from(significand & !(1 << 22)),
+                    }.pack(),
                 }
             }
             _ => Decomposed::new(sign, exp, (1 << 63) | f80_fraction),  // normal
@@ -109,8 +117,16 @@ impl f80 {
             0x7FF => match significand {
                 0 => Classified::Inf { sign },
                 _ => match significand & (1 << 51) {
-                    0 => Classified::SNaN { sign, payload: u64::from(significand) },
-                    _ => Classified::QNaN { sign, payload: u64::from(significand & !(1 << 51)) },
+                    0 => Classified::NaN {
+                        sign,
+                        signaling: true,
+                        payload: u64::from(significand),
+                    },
+                    _ => Classified::NaN {
+                        sign,
+                        signaling: false,
+                        payload: u64::from(significand & !(1 << 51)),
+                    },
                 }
             }
             _ => Classified::Normal { sign, exponent: exp, fraction: f80_fraction },
@@ -211,17 +227,15 @@ impl f80 {
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
             // the significand as an "is_quiet" flag. x87 does this and it
             // matches up with using a zero-payload SNaN for Infinities.
-            Classified::SNaN { sign, payload } |
-            Classified::QNaN { sign, payload } => {
-                let is_quiet = if let Classified::QNaN { .. } = classified { true } else { false };
+            Classified::NaN { sign, signaling, payload } => {
                 let raw_exp = !0 & 0xff;
                 let pl = (payload & 0x3f_ffff) as u32; // 22 remaining fraction bits
 
                 // set quiet bit
-                let fraction = if is_quiet {
-                    pl | (1 << 22)
-                } else {
+                let fraction = if signaling {
                     pl
+                } else {
+                    pl | (1 << 22)
                 };
 
                 let result = f32::recompose_raw(sign, raw_exp, fraction);
@@ -330,17 +344,15 @@ impl f80 {
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
             // the significand as an "is_quiet" flag. x87 does this and it
             // matches up with using a zero-payload SNaN for Infinities.
-            Classified::SNaN { sign, payload } |
-            Classified::QNaN { sign, payload } => {
-                let is_quiet = if let Classified::QNaN { .. } = classified { true } else { false };
+            Classified::NaN { sign, signaling, payload } => {
                 let raw_exp = 0x7ff;
                 let pl = payload & 0x7_ffff_ffff_ffff; // 51 remaining fraction bits
 
                 // set quiet bit
-                let fraction = if is_quiet {
-                    pl | (1 << 51)
-                } else {
+                let fraction = if signaling {
                     pl
+                } else {
+                    pl | (1 << 51)
                 };
 
                 let result = f64::recompose_raw(sign, raw_exp, fraction);
@@ -361,7 +373,7 @@ impl f80 {
 
     pub fn is_nan(&self) -> bool {
         match self.classify() {
-            Classified::QNaN {..} | Classified::SNaN {..} => true,
+            Classified::NaN {..} => true,
             _ => false,
         }
     }
@@ -456,8 +468,8 @@ impl f80 {
                 (0b00, _) => return None,   // Pseudo-NaN
                 (0b01, _) => return None,   // Pseudo-NaN
                 (0b10, 0) => Classified::Inf { sign },
-                (0b10, _) => Classified::SNaN { sign, payload: rest62 },
-                (0b11, _) => Classified::QNaN { sign, payload: rest62 },
+                (0b10, _) => Classified::NaN { sign, signaling: true, payload: rest62 },
+                (0b11, _) => Classified::NaN { sign, signaling: false, payload: rest62 },
                 _ => unreachable!(),
             },
             _ => match integer_bit {
@@ -657,23 +669,16 @@ pub enum Classified {
     Inf {
         sign: bool,
     },
-    /// Signalling NaN. All-one exponent, most significant 2 bits of significand
-    /// are `10`, rest is anything but zero.
-    SNaN {
+    /// A quiet or signaling NaN. All-one exponent, MSb of significand is set,
+    /// rest is anything but zero.
+    NaN {
         sign: bool,
-        /// The non-zero payload carried in the lower 62 bits of the
-        /// significand.
-        payload: u64,
-    },
-    /// Quiet NaN or "Indefinite" result. All-one exponent, most significant 2
-    /// bits of significand are `11`.
-    QNaN {
-        sign: bool,
-        /// The lower 62 bits of the significand (may be 0).
+        signaling: bool,
+        /// The payload carried in the lower 62 bits of the significand.
         ///
-        /// If the payload is 0, this is an "Indefinite" result created by
-        /// undefined calculations (root/logarithm of negative numbers, 0/0,
-        /// Inf/Inf, ...) or using an otherwise invalid operand.
+        /// If the payload of a quiet NaN is 0, this is an "Indefinite" result
+        /// created by undefined calculations (root/logarithm of negative
+        /// numbers, 0/0, Inf/Inf, ...) or using an otherwise invalid operand.
         payload: u64,
     },
     /// Normalized value. Any non-zero and not-all-bits-set exponent, MSb (bit
@@ -693,7 +698,7 @@ pub enum Classified {
 
 impl Classified {
     /// The value returned by invalid or undefined operations.
-    pub const INDEFINITE: Self = Classified::QNaN { sign: false, payload: 0 };
+    pub const INDEFINITE: Self = Classified::NaN { sign: false, signaling: false, payload: 0 };
 
     /// Converts this classified representation back into an equivalent `f80`.
     pub fn pack(&self) -> f80 {
@@ -701,10 +706,10 @@ impl Classified {
             Classified::Zero { sign } => {
                 (*sign, 0, 0)
             }
-            Classified::SNaN { sign, payload } => {
+            Classified::NaN { sign, signaling: true, payload } => {
                 (*sign, !0, (0b10 << 62) | payload)
             }
-            Classified::QNaN { sign, payload } => {
+            Classified::NaN { sign, signaling: false, payload } => {
                 (*sign, !0, (0b11 << 62) | payload)
             }
             Classified::Inf { sign } => {
@@ -782,7 +787,7 @@ mod tests {
     #[test]
     fn nan() {
         match f80::NAN.classify() {
-            Classified::QNaN { sign: false, payload: 0 } => {},
+            Classified::NaN { sign: false, signaling: false, payload: 0 } => {},
             e => panic!("f80::NAN ({:?}) is {:?}", f80::NAN, e),
         }
     }
