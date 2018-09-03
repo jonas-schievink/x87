@@ -318,6 +318,7 @@ impl Significand {
     ///
     /// Note that this will not return any integer bits.
     fn reduced_fraction(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> FloatResult<u64> {
+        // FIXME this is wrong when rounding so that the integer part gets incremented
         assert!(bits <= 64, "too many bits for a u64");
         // f80 has 63 fraction bits, we have more for the overflow calculations
 

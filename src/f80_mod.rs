@@ -86,7 +86,8 @@ impl f80 {
                 _ => return Classified::NaN {
                     sign,
                     signaling: significand & (1 << 22) == 0,
-                    payload: u64::from(significand & !(1 << 22)),
+                    // The smaller f32 payload is moved into the most significant bits
+                    payload: u64::from(significand & !(1 << 22)) << 40,
                 }.pack(),
             }
             _ => Decomposed::new(sign, exp, (1 << 63) | f80_fraction),  // normal
@@ -218,7 +219,8 @@ impl f80 {
             // matches up with using a zero-payload SNaN for Infinities.
             Classified::NaN { sign, signaling, payload } => {
                 let raw_exp = !0 & 0xff;
-                let pl = (payload & 0x3f_ffff) as u32; // 22 remaining fraction bits
+                // Extract the payload from the upper 22 bits
+                let pl = ((payload & (0x3f_ffff << 40)) >> 40) as u32; // 22 remaining fraction bits
 
                 // set quiet bit
                 let fraction = if signaling {
@@ -228,7 +230,7 @@ impl f80 {
                 };
 
                 let result = f32::recompose_raw(sign, raw_exp, fraction);
-                if payload == pl.into() {
+                if payload == u64::from(pl) << 40 {
                     FloatResult::Exact(result)
                 } else {
                     FloatResult::LostNaN(result)

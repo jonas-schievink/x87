@@ -106,7 +106,15 @@ proptest! {
 
         println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f32sum.to_bits(), lhs, rhs, f32sum);
         println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
-        prop_assert_eq!(f32bits, f80bits);
+        if f32sum.is_nan() {
+            // NaN propagation might not work the same way on x87 and the host's
+            // implementation of IEEE, so just require that both impls return
+            // NaN here.
+            assert!(f80sum.is_nan());
+        } else {
+            // For non-NaN results, require bitwise equality.
+            prop_assert_eq!(f32bits, f80bits);
+        }
     }
 }
 

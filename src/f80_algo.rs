@@ -71,8 +71,26 @@ impl f80 {
         };
 
         match (lhs_c, rhs_c) {
-            // Propagate NaNs, preferably the left one, turning signaling ones
-            // into quiet ones.
+            // Propagate NaNs turning signaling ones into quiet ones.
+            (
+                Classified::NaN {sign: lsign, payload: lpl, signaling: _},
+                Classified::NaN {sign: rsign, payload: rpl, signaling: _},
+            ) => {
+                // When both operands are NaNs, the x87 (at least in my Haswell
+                // CPU) propagates the one with the larger payload.
+                let (sign, payload) = if lpl > rpl {
+                    (lsign, lpl)
+                } else {
+                    (rsign, rpl)
+                };
+
+                let cls = Classified::NaN {
+                    sign,
+                    signaling: false,
+                    payload,
+                };
+                Err(FloatResult::Exact(cls.pack()))
+            },
             (Classified::NaN {sign, payload, signaling: _}, _) |
             (_, Classified::NaN {sign, payload, signaling: _}) => {
                 let cls = Classified::NaN {

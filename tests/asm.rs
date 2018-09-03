@@ -1,11 +1,14 @@
 //! This file contains tests that verify correctness against the host's FPU.
 //!
-//! Naturally, this only works when the host is x86 or x86-64.
+//! Naturally, this only works when the host is x86 or x86-64. Due to the use of
+//! inline assembly, it also requires nightly Rust.
 
 #![feature(asm, untagged_unions)]
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 
 #[macro_use] extern crate x87;
+#[macro_use] extern crate proptest;
+extern crate env_logger;
 
 use x87::{X87State, f80};
 
@@ -65,4 +68,69 @@ fn add_f64_double_round_wrong() {
     let f80sum = l80 + r80;
     let f80bits = f80sum.to_f64().to_bits();
     assert_eq!(result80.to_bits(), f80bits, "host FPU != emulation result");
+}
+
+fn add32(lhs_bits: u32, rhs_bits: u32) {
+    let (lhs, rhs) = (f32::from_bits(lhs_bits), f32::from_bits(rhs_bits));
+
+    let mut native_f32_sum = 0.0f32;
+    let mut native_f80_sum = [0u8; 10];
+    run_host_asm!(r"
+        flds $0
+        flds $1
+        faddp
+        fsts $2
+        fstpt $3
+    " : "=*m"(&lhs), "=*m"(&rhs), "=*m"(&mut native_f32_sum), "=*m"(&mut native_f80_sum));
+
+    let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+    let f80sum = l80 + r80;
+    let f80_f32bits = f80sum.to_f32().to_bits();
+
+    let f80native = f80::from_bytes(native_f80_sum);
+    assert_eq!(f80_f32bits, native_f32_sum.to_bits(), "x87:{:?}={:?}, native:{:?}={:?}", f80sum, f80sum.classify(), f80native, f80native.classify());
+    assert_eq!(f80sum.to_bytes(), native_f80_sum, "x87:{:?}={:?}, native:{:?}={:?}", f80sum, f80sum.classify(), f80native, f80native.classify());
+}
+
+/// Discrepancy in NaN payload propagation between the crate and host FPU.
+///
+/// Converting an f32 NaN to f80 should place its payload in the upper bits of
+/// the f80. We used the lower bits.
+#[test]
+fn f32_add_nan_payload() {
+    env_logger::try_init().ok();
+    add32(2139095041, 0);
+}
+
+#[test]
+fn nan_propagation() {
+    env_logger::try_init().ok();
+    add32(0xff800002, 0x7f800001);
+    add32(0x7f800002, 0xff800001);
+    add32(0xff800002, 0xff800001);
+    add32(0x7f800002, 0x7f800001);
+
+    add32(0xff800001, 0x7f800002);
+    add32(0x7f800001, 0xff800002);
+    add32(0xff800001, 0xff800002);
+    add32(0x7f800001, 0x7f800002);
+}
+
+/// Rounding a fraction of `.111111` would not change the integer bits, but has
+/// to.
+#[test]
+fn rounding_affects_integer_bits() {
+    env_logger::try_init().ok();
+    add32(1, 3976200192);
+}
+
+// Note that many of the proptests are duplicated in `f80.rs` - the versions in
+// there do not need asm! or an x86 host as they test against the operations on
+// `f32`/`f64`. The ones in here test against the host FPU.
+
+proptest! {
+    #[test]
+    fn add_f32(lhs_bits: u32, rhs_bits: u32) {
+        add32(lhs_bits, rhs_bits);
+    }
 }
