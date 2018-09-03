@@ -205,7 +205,7 @@ mod tests {
         addition(561687281, 574749429);
     }
 
-    // FIXME this addition of tiny but normal f64s returns the LSb set, it should be unset
+    // FIXME this addition of tiny but normal f64s returns the LSb clear, it should be set
     #[test]
     fn add_f64_regression() {
         addition64(964674174654497230, 10131472521302454270);
