@@ -123,7 +123,11 @@ proptest! {
 
         println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f64sum.to_bits(), lhs, rhs, f64sum);
         println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
-        prop_assert_eq!(f64bits, f80bits);
+
+        // Mimicking f64 operations via conversion to f80 might yield the wrong
+        // result due to double rounding. The difference should not be more than
+        // 1 ULP however, so accept any result that's "close enough".
+        prop_assert!(f64bits - 1 <= f80bits && f80bits <= f64bits + 1);
     }
 }
 

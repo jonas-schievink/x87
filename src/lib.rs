@@ -16,6 +16,7 @@
 extern crate ieee754;
 extern crate core;
 
+mod utils;
 mod decomposed;
 mod f80_algo;
 mod f80_mod;
