@@ -54,3 +54,11 @@ impl ops::Add for f80 {
         self.add_checked(rhs, RoundingMode::default()).into_inner()
     }
 }
+
+impl ops::Sub for f80 {
+    type Output = f80;
+
+    fn sub(self, rhs: f80) -> f80 {
+        self.sub_checked(rhs, RoundingMode::default()).into_inner()
+    }
+}

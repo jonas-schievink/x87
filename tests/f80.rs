@@ -1,3 +1,6 @@
+//! Defines proptests for the `f80` type.
+// FIXME: Use biased test inputs to provoke operations on NaN/Inf/0/-0 more often
+
 extern crate x87;
 #[macro_use] extern crate proptest;
 
@@ -123,6 +126,40 @@ proptest! {
 
         println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f64sum.to_bits(), lhs, rhs, f64sum);
         println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
+        prop_assert_eq!(f64bits, f80bits);
+    }
+}
+
+proptest! {
+    #[test]
+    fn sub_f32(lhs_bits: u32, rhs_bits: u32) {
+        let (lhs, rhs) = (f32::from_bits(lhs_bits), f32::from_bits(rhs_bits));
+        let f32diff = lhs - rhs;
+        let f32bits = f32diff.to_bits();
+
+        let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+        let f80diff = l80 - r80;
+        let f80bits = f80diff.to_f32().to_bits();
+
+        println!("{:#010X}-{:#010X}={:#010X} ({}-{}={})", lhs_bits, rhs_bits, f32diff.to_bits(), lhs, rhs, f32diff);
+        println!("f80: {:?}-{:?}={:?}", l80.classify(), r80.classify(), f80diff.classify());
+        prop_assert_eq!(f32bits, f80bits);
+    }
+}
+
+proptest! {
+    #[test]
+    fn sub_f64(lhs_bits: u64, rhs_bits: u64) {
+        let (lhs, rhs) = (f64::from_bits(lhs_bits), f64::from_bits(rhs_bits));
+        let f64diff = lhs - rhs;
+        let f64bits = f64diff.to_bits();
+
+        let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+        let f80diff = l80 - r80;
+        let f80bits = f80diff.to_f64().to_bits();
+
+        println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f64diff.to_bits(), lhs, rhs, f64diff);
+        println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80diff.classify());
         prop_assert_eq!(f64bits, f80bits);
     }
 }

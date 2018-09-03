@@ -9,6 +9,7 @@ use decomposed::Decomposed;
 use std::cmp;
 
 impl f80 {
+    /// Performs the checked addition `self + rhs`.
     pub fn add_checked(self, rhs: Self, _rounding: RoundingMode) -> FloatResult<Self> {
         let lhs = self;
         let (lhs_c, rhs_c) = match lhs.propagate_nans(rhs) {
@@ -34,14 +35,9 @@ impl f80 {
         trace!("r cls: {:?}; decomp: {:?}", rhs_c, r);
 
         // To add two numbers, their exponents must be equal. We adjust the
-        // numbers to the lower exponent, which possibly shifts one of the
-        // numbers up (to the left).
-        // This becomes a problem when the adjustment causes the significand to
-        // become very large, potentially losing highly significant bits. The
-        // "solution" chosen here limits the amount of downscaling artificially.
-        // FIXME How is this usually done?
+        // numbers to the higher exponent, which possibly shifts one of the
+        // numbers down (to the right) and might round that value.
         let exp = cmp::max(l.exponent(), r.exponent());
-        //let exp = cmp::max(max_exp-15, cmp::min(l.exponent, r.exponent));
         let (l, r) = (l.adjust_exponent_to(exp), r.adjust_exponent_to(exp));
         let exact = l.is_exact() && r.is_exact();
         let (l, r) = (l.unwrap_exact_or_rounded(), r.unwrap_exact_or_rounded());
@@ -53,6 +49,48 @@ impl f80 {
         trace!("sum={:?}", sum_decomp);
         let sum = f80::from_decomposed(sum_decomp);
         trace!("sum decomp: {:?}", sum.into_inner().decompose());
+
+        let exact = exact && sum.is_exact();
+        match sum {
+            FloatResult::Exact(f) if !exact => FloatResult::Rounded(f),
+            _ => sum,
+        }
+    }
+
+    pub fn sub_checked(self, rhs: Self, _rounding: RoundingMode) -> FloatResult<Self> {
+        let lhs = self;
+        let (lhs_c, rhs_c) = match lhs.propagate_nans(rhs) {
+            Ok((lhs_c, rhs_c)) => (lhs_c, rhs_c),
+            Err(res) => return res,
+        };
+
+        match (&lhs_c, &rhs_c) {
+            (Classified::Inf { sign: lsign }, Classified::Inf{ sign: rsign }) => {
+                if lsign == rsign { // lhs == rhs
+                    return FloatResult::Exact(lhs);
+                } else {
+                    return FloatResult::InvalidOperand;
+                }
+            }
+            (Classified::Inf {..}, _) => return FloatResult::Exact(lhs),
+            (_, Classified::Inf {..}) => return FloatResult::Exact(rhs),
+            _ => {}
+        }
+
+        let (l, r) = (lhs_c.decompose().unwrap(), rhs_c.decompose().unwrap());
+        trace!("l cls: {:?}; decomp: {:?}", lhs_c, l);
+        trace!("r cls: {:?}; decomp: {:?}", rhs_c, r);
+
+        // Align the exponent just like addition does
+        let exp = cmp::max(l.exponent(), r.exponent());
+        let (l, r) = (l.adjust_exponent_to(exp), r.adjust_exponent_to(exp));
+        let exact = l.is_exact() && r.is_exact();
+        let (l, r) = (l.unwrap_exact_or_rounded(), r.unwrap_exact_or_rounded());
+        trace!("adj exp={}; lhs={:?}; rhs={:?}", exp, l, r);
+
+        let sum = l.to_sign_magnitude() - r.to_sign_magnitude();
+        let sum = f80::from_decomposed(Decomposed::with_sign_magnitude_exponent(sum, exp));
+        trace!("subtraction decomp: {:?}", sum.into_inner().decompose());
 
         let exact = exact && sum.is_exact();
         match sum {

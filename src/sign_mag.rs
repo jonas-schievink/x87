@@ -17,10 +17,15 @@ impl SignMagnitude {
         Self { sign, magnitude }
     }
 
+    /// Returns the sign of the integer.
+    ///
+    /// Returns `true` when the represented number is `<=0`, `false` is the
+    /// number is `>=0`.
     pub fn sign(&self) -> bool {
         self.sign
     }
 
+    /// Returns the magnitude (or absolute value) of the stored number.
     pub fn magnitude(&self) -> u128 {
         self.magnitude
     }
@@ -111,6 +116,7 @@ impl Mul for SignMagnitude {
     }
 }
 
+/// Negation of sign-magnitude integers just has to flip the sign.
 impl Neg for SignMagnitude {
     type Output = Self;
 
@@ -121,6 +127,26 @@ impl Neg for SignMagnitude {
         }
     }
 }
+
+impl fmt::Display for SignMagnitude {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.sign {
+            f.write_str("-")?;
+        }
+
+        self.magnitude.fmt(f)
+    }
+}
+
+impl fmt::Debug for SignMagnitude {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        <Self as fmt::Display>::fmt(self, f)
+    }
+}
+
+// Conversion from all native unsigned integers up to `u128` is possible,
+// conversion from signed integers only up to `i64` since `i128` can represent
+// the number just below our lowest representable number.
 
 macro_rules! from_unsigned {
     ($t:ty) => {
@@ -157,19 +183,3 @@ from_signed!(i8);
 from_signed!(i16);
 from_signed!(i32);
 from_signed!(i64);
-
-impl fmt::Display for SignMagnitude {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.sign {
-            f.write_str("-")?;
-        }
-
-        self.magnitude.fmt(f)
-    }
-}
-
-impl fmt::Debug for SignMagnitude {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        <Self as fmt::Display>::fmt(self, f)
-    }
-}

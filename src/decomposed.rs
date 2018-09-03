@@ -204,6 +204,11 @@ impl Decomposed {
         }
     }
 
+    /// Returns the 63 fraction bits to be stored in an `f80`.
+    ///
+    /// Note that `f80` stores the integer bit explicitly. Call
+    /// `as_f80_significand` to obtain both the fraction bits and the integer
+    /// bit.
     pub fn as_f80_fraction(&self) -> FloatResult<u64> {
         // 63 fraction bits
         let result = self.reduced_fraction(63);
