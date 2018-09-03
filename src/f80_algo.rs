@@ -45,10 +45,13 @@ impl f80 {
         let (l, r) = (l.adjust_exponent_to(exp), r.adjust_exponent_to(exp));
         let exact = l.is_exact() && r.is_exact();
         let (l, r) = (l.unwrap_exact_or_rounded(), r.unwrap_exact_or_rounded());
-        trace!("adj exp={}; lhs={:?}; rhs={:?}", exp, l, r);
+        trace!("lhs={:?}", l);
+        trace!("rhs={:?}", r);
 
         let sum = l.to_sign_magnitude() + r.to_sign_magnitude();
-        let sum = f80::from_decomposed(Decomposed::with_sign_magnitude_exponent(sum, exp));
+        let sum_decomp = Decomposed::with_sign_magnitude_exponent(sum, exp);
+        trace!("sum={:?}", sum_decomp);
+        let sum = f80::from_decomposed(sum_decomp);
         trace!("sum decomp: {:?}", sum.into_inner().decompose());
 
         let exact = exact && sum.is_exact();
@@ -112,6 +115,23 @@ mod tests {
         debug!("     f80: {:?}+{:?}={:?} ({:?}+{:?}={:?})", l80, r80, f80sum, l80.classify(), r80.classify(), f80sum.classify());
         debug!("    back: {:#010X}+{:#010X}={:#010X}", l80.to_f32().to_bits(), r80.to_f32().to_bits(), f80sum.to_f32().to_bits());
         assert_eq!(f32bits, f80bits, "{:X}; {:X}", f32bits, f80bits);
+    }
+
+    fn addition64(lhs_bits: u64, rhs_bits: u64) {
+        env_logger::try_init().ok();
+
+        let (lhs, rhs) = (f64::from_bits(lhs_bits), f64::from_bits(rhs_bits));
+        let f64sum = lhs + rhs;
+        let f64bits = f64sum.to_bits();
+
+        let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+        let f80sum = l80 + r80;
+        let f80bits = f80sum.to_f64().to_bits();
+
+        debug!("expected: {:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f64sum.to_bits(), lhs, rhs, f64sum);
+        debug!("     f80: {:?}+{:?}={:?} ({:?}+{:?}={:?})", l80, r80, f80sum, l80.classify(), r80.classify(), f80sum.classify());
+        debug!("    back: {:#010X}+{:#010X}={:#010X}", l80.to_f64().to_bits(), r80.to_f64().to_bits(), f80sum.to_f64().to_bits());
+        assert_eq!(f64bits, f80bits, "{:X}; {:X}", f64bits, f80bits);
     }
 
     #[test]
@@ -183,6 +203,12 @@ mod tests {
     #[test]
     fn add_wrong_sticky_computation() {
         addition(561687281, 574749429);
+    }
+
+    // FIXME this addition of tiny but normal f64s returns the LSb set, it should be unset
+    #[test]
+    fn add_f64_regression() {
+        addition64(964674174654497230, 10131472521302454270);
     }
 
     // Most of these were found by proptest and extracted to ease debugging.

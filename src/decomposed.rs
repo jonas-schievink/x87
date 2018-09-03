@@ -228,7 +228,7 @@ impl Decomposed {
             }
         }
         let int = self.integer_bits() == 1;
-        let significand = if int { (1 << 63) } else { 0 };
+        let significand = if int { 1 << 63 } else { 0 };
         if exact {
             FloatResult::Exact(significand | fraction)
         } else {
@@ -331,9 +331,8 @@ impl Significand {
         let guard = self.significand & g_mask != 0;
         let round = self.significand & r_mask != 0;
         let sticky = self.significand & s_mask != 0;
-        trace!("reduced_fraction: self={:?}, bits={}, dropped={}, g_pos={}, r_pos={}, grs={},{},{}", self, bits, 63-bits, g_pos, r_pos, guard, round, sticky);
-
         let truncated = raw_fraction >> (63 - bits);
+        trace!("reduced_fraction: self={:?}, bits={}, dropped={}, g_pos={}, r_pos={}, grs={},{},{}, lsb={}", self, bits, 63-bits, g_pos, r_pos, guard, round, sticky, truncated & 1);
 
         // Now we can adjust the truncated value using the GR and S bits.
         let rounded = match rounding {
@@ -385,8 +384,6 @@ impl fmt::Debug for Significand {
         let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
         let grs = self.significand & 0b111;
         let frac = format!("{:063b}", raw_fraction);
-        let frac = frac.trim_right_matches('0');
-        let frac = if frac.is_empty() { "0" } else { &frac };
         let frac_grs = if grs != 0 {
             format!("{}|{:03b}", frac, grs)
         } else {
