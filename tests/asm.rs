@@ -1,3 +1,7 @@
+//! This file contains tests that verify correctness against the host's FPU.
+//!
+//! Naturally, this only works when the host is x86 or x86-64.
+
 #![feature(asm, untagged_unions)]
 #![cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 
