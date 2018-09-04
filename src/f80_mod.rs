@@ -245,10 +245,21 @@ impl f80 {
                 }
             }
             _ => {
-                let decomp = self.decompose().unwrap().normalize();
-                let exact = decomp.is_exact();
+                let decomp = self.decompose().unwrap();
+
+                let orig_decomp = decomp;
+                let norm = decomp.normalize();
+                let exact = norm.is_exact();
+                let decomp = norm.unwrap_exact_or_rounded().round_to(23);
+                let exact = exact && decomp.is_exact();
+                let rounded = decomp.unwrap_exact_or_rounded();
+                let decomp = rounded.normalize();
+                let exact = exact && decomp.is_exact();
                 let decomp = decomp.unwrap_exact_or_rounded();
-                trace!("finite: {:?}; exact={}", decomp, exact);
+                trace!("to_f32_checked:     orig: {:?}", orig_decomp);
+                trace!("to_f32_checked: normaliz: {:?}", norm);
+                trace!("to_f32_checked:  rounded: {:?}", rounded);
+                trace!("to_f32_checked: postnorm: {:?}", decomp);
 
                 // If the exponent is too small for f32, try encoding as a
                 // denormal, then fall back to rounding to 0. If it's too large,
@@ -311,35 +322,6 @@ impl f80 {
             Classified::Inf { sign } => {
                 FloatResult::Exact(if sign { -1.0/0.0 } else { 1.0/0.0 })
             },
-            /*Classified::Denormal { sign, integer_bit: _, fraction } => {
-                let raw_exp = 0;
-                let frac = (fraction >> 11) & 0xf_ffff_ffff_ffff; // truncate fraction to the upper 52 bits
-                let result = f64::recompose_raw(sign, raw_exp, frac);
-                if (frac << 11) == fraction {
-                    FloatResult::Exact(result)
-                } else {
-                    // lost bits in the process
-                    FloatResult::Rounded(result)
-                }
-            }
-            Classified::Normal { sign, exponent, fraction } => {
-                let frac = (fraction >> 11) & 0xf_ffff_ffff_ffff; // truncate fraction to the upper 52 bits
-                let mut exp = exponent as u16 & 0b000_0111_1111_1111; // drop upper 4 bits of exponent (15->11)
-                exp |= if exp & 0b100_0000_0000 != 0 {0b1111_1000_0000_0000} else {0};   // sign-extend
-                let exp = exp as i16;
-
-                let result = f64::recompose(sign, exp, frac);
-                //println!("Normal->f64: exp={}->{} frac={:#X}->{:#010X}", exponent, exp, fraction, frac);
-                match (exp == exponent, (frac << 11) == fraction) {
-                    (true, true) => FloatResult::Exact(result),
-                    (true, false) => FloatResult::Rounded(result), // lost fraction bits in the process
-                    (false, _) => if exponent < 0 { // exponent is off = more than 2x off
-                        FloatResult::TooSmall
-                    } else {
-                        FloatResult::TooLarge
-                    },
-                }
-            }*/
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
             // the significand as an "is_quiet" flag. x87 does this and it
             // matches up with using a zero-payload SNaN for Infinities.
@@ -362,10 +344,21 @@ impl f80 {
                 }
             }
             _ => {
-                let decomp = self.decompose().unwrap().normalize();
-                let exact = decomp.is_exact();
+                let decomp = self.decompose().unwrap();
+
+                let orig_decomp = decomp;
+                let norm = decomp.normalize();
+                let exact = norm.is_exact();
+                let decomp = norm.unwrap_exact_or_rounded().round_to(52);
+                let exact = exact && decomp.is_exact();
+                let rounded = decomp.unwrap_exact_or_rounded();
+                let decomp = rounded.normalize();
+                let exact = exact && decomp.is_exact();
                 let decomp = decomp.unwrap_exact_or_rounded();
-                trace!("finite: {:?}; exact={}", decomp, exact);
+                trace!("to_f64_checked:     orig: {:?}", orig_decomp);
+                trace!("to_f64_checked: normaliz: {:?}", norm);
+                trace!("to_f64_checked:  rounded: {:?}", rounded);
+                trace!("to_f64_checked: postnorm: {:?}", decomp);
 
                 // If the exponent is too small for f64, try encoding as a
                 // denormal, then fall back to rounding to 0. If it's too large,

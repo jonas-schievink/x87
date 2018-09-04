@@ -254,7 +254,7 @@ impl Decomposed {
     /// Depending on the previous value of `self`, this can influence integer
     /// bits and denormalize the result. Call `normalize` again to perform
     /// "postnormalization".
-    fn round_to(&self, bits: u8) -> FloatResult<Self> {
+    pub fn round_to(&self, bits: u8) -> FloatResult<Self> {
         let result = self.significand.round_to(bits, self.sign, RoundingMode::Nearest);
         let exact = result.is_exact();
         let result = result.unwrap_exact_or_rounded();

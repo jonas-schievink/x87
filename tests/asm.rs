@@ -9,8 +9,10 @@
 #[macro_use] extern crate x87;
 #[macro_use] extern crate proptest;
 extern crate env_logger;
+extern crate ieee754;
 
 use x87::{X87State, f80};
+use ieee754::Ieee754;
 
 union X87StateUnion {
     raw: [u8; 108],
@@ -88,8 +90,17 @@ fn add32(lhs_bits: u32, rhs_bits: u32) {
     let f80_f32bits = f80sum.to_f32().to_bits();
 
     let f80native = f80::from_bytes(native_f80_sum);
-    assert_eq!(f80_f32bits, native_f32_sum.to_bits(), "x87:{:?}={:?}, native:{:?}={:?}", f80sum, f80sum.classify(), f80native, f80native.classify());
-    assert_eq!(f80sum.to_bytes(), native_f80_sum, "x87:{:?}={:?}, native:{:?}={:?}", f80sum, f80sum.classify(), f80native, f80native.classify());
+    assert_eq!(
+        f80_f32bits, native_f32_sum.to_bits(),
+        "f32 sum mismatch: x87:{}={:?}={:#010X}={:?}, native:{}={:?}={:#010X}={:?}",
+        f80sum.to_f32(), f80sum.to_f32().classify(), f80_f32bits, f80sum.to_f32().decompose(),
+        native_f32_sum, native_f32_sum.classify(), native_f32_sum.to_bits(), native_f32_sum.decompose(),
+    );
+    assert_eq!(
+        f80sum.to_bytes(), native_f80_sum,
+        "f80 sum mismatch: x87:{:?}={:?}, native:{:?}={:?}",
+        f80sum, f80sum.classify(), f80native, f80native.classify(),
+    );
 }
 
 /// Discrepancy in NaN payload propagation between the crate and host FPU.
@@ -122,6 +133,14 @@ fn nan_propagation() {
 fn rounding_affects_integer_bits() {
     env_logger::try_init().ok();
     add32(1, 3976200192);
+}
+
+/// Missing the correct rounding and postnormalization steps in `to_f32_checked`
+/// result in this failing.
+#[test]
+fn to_f32_postnormalizes() {
+    env_logger::try_init().ok();
+    add32(3120562177, 1518338048);
 }
 
 // Note that many of the proptests are duplicated in `f80.rs` - the versions in
