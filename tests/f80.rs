@@ -104,8 +104,6 @@ proptest! {
         let f80sum = l80 + r80;
         let f80bits = f80sum.to_f32().to_bits();
 
-        println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f32sum.to_bits(), lhs, rhs, f32sum);
-        println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
         if f32sum.is_nan() {
             // NaN propagation might not work the same way on x87 and the host's
             // implementation of IEEE, so just require that both impls return
@@ -128,9 +126,6 @@ proptest! {
         let (l80, r80) = (f80::from(lhs), f80::from(rhs));
         let f80sum = l80 + r80;
         let f80bits = f80sum.to_f64().to_bits();
-
-        println!("{:#010X}+{:#010X}={:#010X} ({}+{}={})", lhs_bits, rhs_bits, f64sum.to_bits(), lhs, rhs, f64sum);
-        println!("f80: {:?}+{:?}={:?}", l80.classify(), r80.classify(), f80sum.classify());
 
         // Mimicking f64 operations via conversion to f80 might yield the wrong
         // result due to double rounding. The difference should not be more than
