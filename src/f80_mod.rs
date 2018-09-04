@@ -131,10 +131,18 @@ impl f80 {
     /// space.
     pub fn from_decomposed(decomp: Decomposed) -> FloatResult<Self> {
         let orig_decomp = decomp;
-        let decomp = decomp.normalize();
-        let exact = decomp.is_exact();
-        trace!("from_decomposed: {:?} -> {:?}", orig_decomp, decomp);
+        let norm = decomp.normalize();
+        let exact = norm.is_exact();
+        let decomp = norm.unwrap_exact_or_rounded().round();
+        let exact = exact && decomp.is_exact();
+        let rounded = decomp.unwrap_exact_or_rounded();
+        let decomp = rounded.normalize();
+        let exact = exact && decomp.is_exact();
         let decomp = decomp.unwrap_exact_or_rounded();
+        trace!("from_decomposed:     orig: {:?}", orig_decomp);
+        trace!("from_decomposed: normaliz: {:?}", norm);
+        trace!("from_decomposed:  rounded: {:?}", rounded);
+        trace!("from_decomposed: postnorm: {:?}", decomp);
 
         let sign = if decomp.sign { 1 << 79 } else { 0 };
 

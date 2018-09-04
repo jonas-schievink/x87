@@ -181,6 +181,7 @@ impl Decomposed {
     }
 
     pub fn as_f32_significand(&self) -> FloatResult<u32> {
+        // FIXME this is *still* wrong since it has to *change* self's exponent
         // 23 fraction bits
         let result = self.reduced_fraction(23);
         let exact = result.is_exact();
@@ -248,7 +249,34 @@ impl Decomposed {
         self.significand.reduced_fraction(bits, self.sign, RoundingMode::Nearest)
     }
 
-    fn integer_bits(&self) -> u128 {
+    /// Rounds `self` so that the result has `bits` fraction bits.
+    ///
+    /// Depending on the previous value of `self`, this can influence integer
+    /// bits and denormalize the result. Call `normalize` again to perform
+    /// "postnormalization".
+    fn round_to(&self, bits: u8) -> FloatResult<Self> {
+        let result = self.significand.round_to(bits, self.sign, RoundingMode::Nearest);
+        let exact = result.is_exact();
+        let result = result.unwrap_exact_or_rounded();
+
+        let result = Self {
+            sign: self.sign,
+            exponent: self.exponent,
+            significand: result,
+        };
+
+        if exact {
+            FloatResult::Exact(result)
+        } else {
+            FloatResult::Rounded(result)
+        }
+    }
+
+    pub fn round(&self) -> FloatResult<Self> {
+        self.round_to(63)
+    }
+
+    fn integer_bits(&self) -> u64 {
         self.significand.integer_bits()
     }
 }
@@ -301,28 +329,22 @@ impl Significand {
         self.significand == 0
     }
 
-    fn integer_bits(&self) -> u128 {
-        self.significand >> (63 + 3)    // move GRS bits and fraction away
+    fn integer_bits(&self) -> u64 {
+        (self.significand >> (63 + 3)) as u64  // move GRS bits and fraction away
+    }
+
+    fn fraction_bits(&self) -> u64 {
+        ((self.significand >> 3) & 0x7fff_ffff_ffff_ffff) as u64
     }
 
     fn sticky_bit(&self) -> u128 {
         self.significand & 1
     }
 
-    /// Rounds the fraction bits to get the given number of fraction bits
-    /// (up to 64).
-    ///
-    /// This is used for converting the extended significand (with guard, round
-    /// and sticky bits) to the significand to use in the resulting `f80`. It
-    /// can also produce smaller outputs for use in `f32` or `f64`.
-    ///
-    /// Note that this will not return any integer bits.
-    fn reduced_fraction(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> FloatResult<u64> {
-        // FIXME this is wrong when rounding so that the integer part gets incremented
+    fn round_to(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> FloatResult<Self> {
         assert!(bits <= 64, "too many bits for a u64");
         // f80 has 63 fraction bits, we have more for the overflow calculations
 
-        let raw_fraction = (self.significand & (0x7fff_ffff_ffff_ffff << 3)) >> 3;  // clears GRS
         // obtain the bits we're about to drop on the floor and build the actual GRS bits
         let (g_pos, r_pos) = (63 - bits + 2, 63 - bits + 1);
         let g_mask = 1 << g_pos;
@@ -332,7 +354,7 @@ impl Significand {
         let guard = self.significand & g_mask != 0;
         let round = self.significand & r_mask != 0;
         let sticky = self.significand & s_mask != 0;
-        let truncated = raw_fraction >> (63 - bits);
+        let truncated = self.significand >> (63 - bits + 3);  // drop GRS bits
         trace!("reduced_fraction: self={:?}, bits={}, dropped={}, g_pos={}, r_pos={}, grs={},{},{}, lsb={}", self, bits, 63-bits, g_pos, r_pos, guard, round, sticky, truncated & 1);
 
         // Now we can adjust the truncated value using the GR and S bits.
@@ -362,11 +384,33 @@ impl Significand {
             _ => unimplemented!(),  // TODO rounding
         };
 
-        trace!("reduced_fraction: -> {:#b}", rounded);
-        if rounded << (63 - bits) == raw_fraction && !guard && !round && !sticky {
-            FloatResult::Exact(rounded as u64)
+        let back = rounded << (63 - bits + 3);
+        let result = Significand::from_raw(back);
+        trace!("reduced_fraction: -> {:?}", result);
+        if back == self.significand {
+            FloatResult::Exact(result)
         } else {
-            FloatResult::Rounded(rounded as u64)
+            FloatResult::Rounded(result)
+        }
+    }
+
+    /// Rounds the fraction bits to get the given number of fraction bits
+    /// (up to 64).
+    ///
+    /// This is used for converting the extended significand (with guard, round
+    /// and sticky bits) to the significand to use in the resulting `f80`. It
+    /// can also produce smaller outputs for use in `f32` or `f64`.
+    ///
+    /// Note that this will not return any integer bits.
+    fn reduced_fraction(&self, bits: u8, sign: bool, rounding: RoundingMode) -> FloatResult<u64> {
+        let rounded = self.round_to(bits, sign, rounding);
+        let exact = rounded.is_exact();
+        let rounded = rounded.unwrap_exact_or_rounded();
+        let result = rounded.fraction_bits() >> (63 - bits);
+        if exact {
+            FloatResult::Exact(result)
+        } else {
+            FloatResult::Rounded(result)
         }
     }
 }

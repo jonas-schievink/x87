@@ -33,15 +33,8 @@ impl f80 {
         trace!("l cls: {:?}; decomp: {:?}", lhs_c, l);
         trace!("r cls: {:?}; decomp: {:?}", rhs_c, r);
 
-        // To add two numbers, their exponents must be equal. We adjust the
-        // numbers to the lower exponent, which possibly shifts one of the
-        // numbers up (to the left).
-        // This becomes a problem when the adjustment causes the significand to
-        // become very large, potentially losing highly significant bits. The
-        // "solution" chosen here limits the amount of downscaling artificially.
-        // FIXME How is this usually done?
+        // Align exponents to the highest one
         let exp = cmp::max(l.exponent(), r.exponent());
-        //let exp = cmp::max(max_exp-15, cmp::min(l.exponent, r.exponent));
         let (l, r) = (l.adjust_exponent_to(exp), r.adjust_exponent_to(exp));
         let exact = l.is_exact() && r.is_exact();
         let (l, r) = (l.unwrap_exact_or_rounded(), r.unwrap_exact_or_rounded());
