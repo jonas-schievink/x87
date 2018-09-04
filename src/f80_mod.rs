@@ -606,7 +606,12 @@ pub enum FloatResult<T> {
     /// If the invalid operand exception is masked, the result of the operation
     /// is an indefinite result, a QNaN with payload 0, which is also returned
     /// by `into_inner`.
-    InvalidOperand,
+    InvalidOperand {
+        /// When turned into a QNaN, the sign depends on the performed
+        /// operation. Presumably the designers just left the signal paths for
+        /// the sign bit intact.
+        sign: bool,
+    },
 }
 
 impl<T> From<ExactOrRounded<T>> for FloatResult<T> {
@@ -657,7 +662,8 @@ impl FloatResult<f32> {
             FloatResult::TooLarge => f32::INFINITY,
             FloatResult::TooSmall => f32::NEG_INFINITY,
             FloatResult::LostNaN(t) => t,
-            FloatResult::InvalidOperand => f32::NAN,
+            FloatResult::InvalidOperand { sign: false } => f32::NAN,
+            FloatResult::InvalidOperand { sign: true } => -f32::NAN,
         }
     }
 }
@@ -671,7 +677,8 @@ impl FloatResult<f64> {
             FloatResult::TooLarge => f64::INFINITY,
             FloatResult::TooSmall => f64::NEG_INFINITY,
             FloatResult::LostNaN(t) => t,
-            FloatResult::InvalidOperand => f64::NAN,
+            FloatResult::InvalidOperand { sign: false } => f64::NAN,
+            FloatResult::InvalidOperand { sign: true } => -f64::NAN,
         }
     }
 }
@@ -685,7 +692,8 @@ impl FloatResult<f80> {
             FloatResult::TooLarge => f80::INFINITY,
             FloatResult::TooSmall => f80::NEG_INFINITY,
             FloatResult::LostNaN(t) => t,
-            FloatResult::InvalidOperand => f80::NAN,
+            FloatResult::InvalidOperand { sign: false } => f80::NAN,
+            FloatResult::InvalidOperand { sign: true } => -f80::NAN,
         }
     }
 }

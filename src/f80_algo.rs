@@ -21,7 +21,7 @@ impl f80 {
                 if lsign == rsign { // lhs == rhs
                     return FloatResult::Exact(lhs);
                 } else {
-                    return FloatResult::InvalidOperand;
+                    return FloatResult::InvalidOperand { sign: true };
                 }
             }
             (Classified::Inf {..}, _) => return FloatResult::Exact(lhs),
@@ -60,7 +60,7 @@ impl f80 {
         let lhs = self;
         let (lhs_c, rhs_c) = match (lhs.classify_checked(), rhs.classify_checked()) {
             (Some(lhs), Some(rhs)) => (lhs, rhs),
-            _ => return Err(FloatResult::InvalidOperand),
+            _ => return Err(FloatResult::InvalidOperand {sign: false}),  // FIXME check against HW
         };
 
         match (lhs_c, rhs_c) {

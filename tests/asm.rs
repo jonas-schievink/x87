@@ -151,6 +151,18 @@ fn addition_doesnt_create_signed_zero() {
     add32(54623649, 2202107297);
 }
 
+/// Checks addition of infinities against x87 HW.
+#[test]
+fn infinities() {
+    let pinf: f32 = 1.0/0.0;    // +Inf
+    let minf: f32 = -1.0/0.0;   // -Inf
+    add32(pinf.to_bits(), pinf.to_bits());
+    add32(minf.to_bits(), minf.to_bits());
+    // These return a signed NaN on a real x87:
+    add32(minf.to_bits(), pinf.to_bits());
+    add32(pinf.to_bits(), minf.to_bits());
+}
+
 // Note that many of the proptests are duplicated in `f80.rs` - the versions in
 // there do not need asm! or an x86 host as they test against the operations on
 // `f32`/`f64`. The ones in here test against the host FPU.
