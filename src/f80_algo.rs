@@ -54,6 +54,16 @@ impl f80 {
         }
     }
 
+    pub fn sub_checked(self, rhs: Self, rounding: RoundingMode) -> FloatResult<Self> {
+        // We need to do NaN propagation on the non-negated rhs to get the right sign
+        if let Err(res) = self.propagate_nans(rhs) {
+            return res;
+        }
+
+        // Now this can't be that simple, can it?
+        self.add_checked(-rhs, rounding)
+    }
+
     /// Classifies `self` and `rhs`, returning an `Err` when one of them is NaN.
     fn propagate_nans(self, rhs: Self) -> Result<(Classified, Classified), FloatResult<Self>> {
         // short-circuit on invalid operands (which might turn into QNaNs later)

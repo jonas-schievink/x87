@@ -77,9 +77,10 @@ fn add32(lhs_bits: u32, rhs_bits: u32) {
 
     let mut native_f32_sum = 0.0f32;
     let mut native_f80_sum = [0u8; 10];
+    // Note that operands are pushed in reversed order
     run_host_asm!(r"
-        flds $0
         flds $1
+        flds $0
         faddp
         fsts $2
         fstpt $3
@@ -100,6 +101,38 @@ fn add32(lhs_bits: u32, rhs_bits: u32) {
         f80sum.to_bytes(), native_f80_sum,
         "f80 sum mismatch: x87:{:?}={:?}, native:{:?}={:?}",
         f80sum, f80sum.classify(), f80native, f80native.classify(),
+    );
+}
+
+fn sub32(lhs_bits: u32, rhs_bits: u32) {
+    let (lhs, rhs) = (f32::from_bits(lhs_bits), f32::from_bits(rhs_bits));
+
+    let mut native_f32_diff = 0.0f32;
+    let mut native_f80_diff = [0u8; 10];
+    // Note that operands are pushed in reversed order
+    run_host_asm!(r"
+        flds $1
+        flds $0
+        fsubp
+        fsts $2
+        fstpt $3
+    " : "=*m"(&lhs), "=*m"(&rhs), "=*m"(&mut native_f32_diff), "=*m"(&mut native_f80_diff));
+
+    let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+    let f80diff = l80 - r80;
+    let f80_f32bits = f80diff.to_f32().to_bits();
+
+    let f80native = f80::from_bytes(native_f80_diff);
+    assert_eq!(
+        f80_f32bits, native_f32_diff.to_bits(),
+        "f32 sum mismatch: x87:{}={:?}={:#010X}={:?}, native:{}={:?}={:#010X}={:?}",
+        f80diff.to_f32(), f80diff.to_f32().classify(), f80_f32bits, f80diff.to_f32().decompose(),
+        native_f32_diff, native_f32_diff.classify(), native_f32_diff.to_bits(), native_f32_diff.decompose(),
+    );
+    assert_eq!(
+        f80diff.to_bytes(), native_f80_diff,
+        "f80 sum mismatch: x87:{:?}={:?}, native:{:?}={:?}",
+        f80diff, f80diff.classify(), f80native, f80native.classify(),
     );
 }
 
@@ -173,6 +206,15 @@ fn zero_exponent() {
     add32(2147483649, 0);
 }
 
+/// `0.0 - NaN = NaN`.
+///
+/// We returned `-NaN` instead.
+#[test]
+fn zero_minus_nan() {
+    env_logger::try_init().ok();
+    sub32(0, 2139095041);
+}
+
 // Note that many of the proptests are duplicated in `f80.rs` - the versions in
 // there do not need asm! or an x86 host as they test against the operations on
 // `f32`/`f64`. The ones in here test against the host FPU.
@@ -181,5 +223,12 @@ proptest! {
     #[test]
     fn add_f32(lhs_bits: u32, rhs_bits: u32) {
         add32(lhs_bits, rhs_bits);
+    }
+}
+
+proptest! {
+    #[test]
+    fn sub_f32(lhs_bits: u32, rhs_bits: u32) {
+        sub32(lhs_bits, rhs_bits);
     }
 }
