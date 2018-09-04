@@ -127,10 +127,17 @@ proptest! {
         let f80sum = l80 + r80;
         let f80bits = f80sum.to_f64().to_bits();
 
-        // Mimicking f64 operations via conversion to f80 might yield the wrong
-        // result due to double rounding. The difference should not be more than
-        // 1 ULP however, so accept any result that's "close enough".
-        prop_assert!(f64bits - 1 <= f80bits && f80bits <= f64bits + 1);
+        if f64sum.is_nan() {
+            // NaN propagation might not work the same way on x87 and the host's
+            // implementation of IEEE, so just require that both impls return
+            // NaN here.
+            assert!(f80sum.is_nan());
+        } else {
+            // Mimicking f64 operations via conversion to f80 might yield the wrong
+            // result due to double rounding. The difference should not be more than
+            // 1 ULP however, so accept any result that's "close enough".
+            prop_assert!(f64bits - 1 <= f80bits && f80bits <= f64bits + 1);
+        }
     }
 }
 
