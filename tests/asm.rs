@@ -163,6 +163,16 @@ fn infinities() {
     add32(pinf.to_bits(), minf.to_bits());
 }
 
+/// Test that a zero operand won't cause the exponent alignment code to drop
+/// bits of the other operand.
+///
+/// Could also solve this by special-casing 0.0 when adding.
+#[test]
+fn zero_exponent() {
+    env_logger::try_init().ok();
+    add32(2147483649, 0);
+}
+
 // Note that many of the proptests are duplicated in `f80.rs` - the versions in
 // there do not need asm! or an x86 host as they test against the operations on
 // `f32`/`f64`. The ones in here test against the host FPU.

@@ -801,7 +801,9 @@ impl Classified {
                 (*sign, -16382, int | fraction)
             }
             Classified::Zero { sign } => {
-                (*sign, 0, 0)
+                // Select the minimum exponent to ensure that exponent alignment
+                // chooses the other operand's exponent.
+                (*sign, -16382, 0)
             }
             _ => return None,
         };

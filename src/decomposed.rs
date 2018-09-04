@@ -11,6 +11,7 @@ use utils::ExactOrRounded;
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct Decomposed {
     pub sign: bool,
+    /// Normally, between −16382 and 16383.
     exponent: i16,
     significand: Significand,
 }
@@ -93,9 +94,9 @@ impl Decomposed {
         let mut normalized = *self;
 
         if self.significand.is_exactly_zero() {
-            // Value is zero. Make the exponent sane (since it doesn't matter)
-            // and return.
-            normalized.exponent = 0;
+            // Value is zero. Choose the lowest exponent so that exponent
+            // alignment won't choose it.
+            normalized.exponent = -16382;
             return ExactOrRounded::Exact(normalized);
         }
 
