@@ -143,6 +143,14 @@ fn to_f32_postnormalizes() {
     add32(3120562177, 1518338048);
 }
 
+/// This fails if addition of equal-magnitude but opposing-sign values results
+/// in `-0.0`.
+#[test]
+fn addition_doesnt_create_signed_zero() {
+    env_logger::try_init().ok();
+    add32(54623649, 2202107297);
+}
+
 // Note that many of the proptests are duplicated in `f80.rs` - the versions in
 // there do not need asm! or an x86 host as they test against the operations on
 // `f32`/`f64`. The ones in here test against the host FPU.

@@ -72,20 +72,23 @@ impl Add for SignMagnitude {
                 magnitude: self.magnitude + rhs.magnitude,
             }
         } else {
-            let small = if self.magnitude < rhs.magnitude {
-                self
-            } else {
-                rhs
-            };
-            let large = if self.magnitude > rhs.magnitude {
-                self
-            } else {
-                rhs
+            let (sign, mag) = match (self, rhs) {
+                (l, r) if l.magnitude < r.magnitude => {
+                    (r.sign, r.magnitude - l.magnitude)
+                }
+                (l, r) if l.magnitude > r.magnitude => {
+                    (l.sign, l.magnitude - r.magnitude)
+                }
+                _ => {  // equal magnitudes
+                    // make sure the sign isn't getting set (we already know
+                    // l and r have opposite signs)
+                    (false, 0)
+                }
             };
 
             Self {
-                sign: large.sign,
-                magnitude: large.magnitude - small.magnitude,
+                sign,
+                magnitude: mag,
             }
         }
     }
