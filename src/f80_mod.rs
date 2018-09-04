@@ -1,6 +1,7 @@
 use decomposed::Decomposed;
 use ieee754::Ieee754;
 use std::{f32, f64, u64, fmt};
+use utils::ExactOrRounded;
 
 /// An 80-bit extended precision floating point number.
 #[repr(transparent)]
@@ -616,7 +617,15 @@ pub enum FloatResult<T> {
     /// by `into_inner`.
     InvalidOperand,
 }
-// TODO: Improve ergonomics of this, it's pretty annoying to use
+
+impl<T> From<ExactOrRounded<T>> for FloatResult<T> {
+    fn from(t: ExactOrRounded<T>) -> Self {
+        match t {
+            ExactOrRounded::Exact(t) => FloatResult::Exact(t),
+            ExactOrRounded::Rounded(t) => FloatResult::Rounded(t),
+        }
+    }
+}
 
 impl<T> FloatResult<T> {
     pub fn is_exact(&self) -> bool {

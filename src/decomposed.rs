@@ -5,6 +5,7 @@ use sign_mag::SignMagnitude;
 use f80_mod::FloatResult;
 use RoundingMode;
 use std::{fmt, ops};
+use utils::ExactOrRounded;
 
 /// A normalized or denormal `f80` decomposed into its components (may be zero).
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -255,21 +256,13 @@ impl Decomposed {
     /// bits and denormalize the result. Call `normalize` again to perform
     /// "postnormalization".
     pub fn round_to(&self, bits: u8) -> FloatResult<Self> {
-        let result = self.significand.round_to(bits, self.sign, RoundingMode::Nearest);
-        let exact = result.is_exact();
-        let result = result.unwrap_exact_or_rounded();
-
-        let result = Self {
-            sign: self.sign,
-            exponent: self.exponent,
-            significand: result,
-        };
-
-        if exact {
-            FloatResult::Exact(result)
-        } else {
-            FloatResult::Rounded(result)
-        }
+        self.significand.round_to(bits, self.sign, RoundingMode::Nearest).map(|result| {
+            Self {
+                sign: self.sign,
+                exponent: self.exponent,
+                significand: result,
+            }
+        }).into()
     }
 
     pub fn round(&self) -> FloatResult<Self> {
@@ -341,7 +334,7 @@ impl Significand {
         self.significand & 1
     }
 
-    fn round_to(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> FloatResult<Self> {
+    fn round_to(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> ExactOrRounded<Self> {
         assert!(bits <= 64, "too many bits for a u64");
         // f80 has 63 fraction bits, we have more for the overflow calculations
 
@@ -387,11 +380,8 @@ impl Significand {
         let back = rounded << (63 - bits + 3);
         let result = Significand::from_raw(back);
         trace!("reduced_fraction: -> {:?}", result);
-        if back == self.significand {
-            FloatResult::Exact(result)
-        } else {
-            FloatResult::Rounded(result)
-        }
+
+        ExactOrRounded::exact_if(result, back == self.significand)
     }
 
     /// Rounds the fraction bits to get the given number of fraction bits
@@ -403,15 +393,9 @@ impl Significand {
     ///
     /// Note that this will not return any integer bits.
     fn reduced_fraction(&self, bits: u8, sign: bool, rounding: RoundingMode) -> FloatResult<u64> {
-        let rounded = self.round_to(bits, sign, rounding);
-        let exact = rounded.is_exact();
-        let rounded = rounded.unwrap_exact_or_rounded();
-        let result = rounded.fraction_bits() >> (63 - bits);
-        if exact {
-            FloatResult::Exact(result)
-        } else {
-            FloatResult::Rounded(result)
-        }
+        self.round_to(bits, sign, rounding).map(|rounded| {
+            rounded.fraction_bits() >> (63 - bits)
+        }).into()
     }
 }
 

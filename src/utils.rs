@@ -24,3 +24,63 @@ macro_rules! run_host_asm {
         }
     }};
 }
+
+/// An exact or rounded result of a computation.
+#[derive(Debug)]
+pub enum ExactOrRounded<T> {
+    Exact(T),
+    Rounded(T),
+}
+
+impl<T> ExactOrRounded<T> {
+    /// Creates an exact result if `exact` is `true`, a rounded result if not.
+    pub fn exact_if(value: T, exact: bool) -> Self {
+        if exact {
+            ExactOrRounded::Exact(value)
+        } else {
+            ExactOrRounded::Rounded(value)
+        }
+    }
+
+    /// Returns a boolean indicating whether `self` represents an exact result.
+    pub fn is_exact(&self) -> bool {
+        match self {
+            ExactOrRounded::Exact(_) => true,
+            ExactOrRounded::Rounded(_) => false,
+        }
+    }
+
+    /// Calls a closure `f` with the contained value, and returns `Rounded` if
+    /// either `self` or the result returned by `f` is `Rounded`.
+    ///
+    /// Only returns `Exact` if all steps of a computation report that the
+    /// result is exact.
+    pub fn chain<F, U>(self, f: F) -> ExactOrRounded<U>
+    where F: FnOnce(T) -> ExactOrRounded<U> {
+        match self {
+            ExactOrRounded::Exact(t) => f(t),
+            ExactOrRounded::Rounded(t) => {
+                ExactOrRounded::Rounded(f(t).into_inner())
+            }
+        }
+    }
+
+    /// Applies a closure to the inner value.
+    ///
+    /// The exactness of the result will be the same as for `self`.
+    pub fn map<F, U>(self, f: F) -> ExactOrRounded<U>
+    where F: FnOnce(T) -> U {
+        match self {
+            ExactOrRounded::Exact(t) => ExactOrRounded::Exact(f(t)),
+            ExactOrRounded::Rounded(t) => ExactOrRounded::Rounded(f(t)),
+        }
+    }
+
+    /// Extracts the inner value, disposing exactness information.
+    pub fn into_inner(self) -> T {
+        match self {
+            ExactOrRounded::Exact(t) => t,
+            ExactOrRounded::Rounded(t) => t,
+        }
+    }
+}
