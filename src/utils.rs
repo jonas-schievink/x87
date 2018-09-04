@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 /// Executes assembly instructions on the host and returns the host FPU's state
 /// after the operations.
 ///
@@ -48,6 +49,28 @@ impl<T> ExactOrRounded<T> {
             ExactOrRounded::Exact(_) => true,
             ExactOrRounded::Rounded(_) => false,
         }
+    }
+
+    /// Returns an exact result, raises a panic when the result isn't exact.
+    pub fn unwrap_exact(self) -> T where T: Debug {
+        self.expect_exact("called `unwrap_exact` on a rounded value")
+    }
+
+    /// Returns an exact result, raises a panic with the given message when the
+    /// result isn't exact.
+    pub fn expect_exact(self, msg: &str) -> T where T: Debug {
+        match self {
+            ExactOrRounded::Exact(e) => e,
+            ExactOrRounded::Rounded(r) => {
+                panic!("{}: {:?}", msg, r);
+            }
+        }
+    }
+
+    /// Returns a result that is exact if `self` is exact and `exact` is `true`.
+    pub fn keep_exact_if(self, exact: bool) -> Self {
+        let exact = self.is_exact() && exact;
+        Self::exact_if(self.into_inner(), exact)
     }
 
     /// Calls a closure `f` with the contained value, and returns `Rounded` if

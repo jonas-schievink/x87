@@ -89,14 +89,14 @@ impl Decomposed {
     /// the shifted significand.
     ///
     /// If `self` is zero this does nothing as no normalization is necessary.
-    pub fn normalize(&self) -> FloatResult<Self> {
+    pub fn normalize(&self) -> ExactOrRounded<Self> {
         let mut normalized = *self;
 
         if self.significand.is_exactly_zero() {
             // Value is zero. Make the exponent sane (since it doesn't matter)
             // and return.
             normalized.exponent = 0;
-            return FloatResult::Exact(normalized);
+            return ExactOrRounded::Exact(normalized);
         }
 
         // If normalized, we want bit #63 to be set, and all higher-valued bits
@@ -107,36 +107,28 @@ impl Decomposed {
             // by adjusting exponent downwards.
             // This doesn't lose any bits (ie. doesn't round).
             let diff = (leading_zeros - Self::LEADING_ZEROS_WHEN_NORMALIZED) as i16;
-            let result = normalized.adjust_exponent_to(self.exponent - diff);
-            assert!(result.is_exact(), "unexpectedly lost bits during normalize");
-            normalized = result.unwrap_exact_or_rounded();
+            let normalized = normalized.adjust_exponent_to(self.exponent - diff)
+                .expect_exact("unexpectedly lost bits during normalize");
             assert!(normalized.is_normalized());
 
-            FloatResult::Exact(normalized)
+            ExactOrRounded::Exact(normalized)
         } else if leading_zeros < Self::LEADING_ZEROS_WHEN_NORMALIZED {
             // There's a 1-bit too far to the left, shift it into the integer
             // bit position by adjusting exponent upwards.
             let diff = (Self::LEADING_ZEROS_WHEN_NORMALIZED - leading_zeros) as i16;
-            let result = normalized.adjust_exponent_to(self.exponent + diff);
-            let exact = result.is_exact();
-            normalized = result.unwrap_exact_or_rounded();
-            assert!(normalized.is_normalized());
-
-            if exact {
-                FloatResult::Exact(normalized)
-            } else {
-                // Lost bits in the process
-                FloatResult::Rounded(normalized)
-            }
+            normalized.adjust_exponent_to(self.exponent + diff).map(|normalized| {
+                assert!(normalized.is_normalized());
+                normalized
+            })
         } else {
             // == 64 -> already normalized
-            FloatResult::Exact(normalized)
+            ExactOrRounded::Exact(normalized)
         }
     }
 
     /// Adjust exponent and significant so that the exponent equals the given
     /// `exponent` while `self` still refers to the same number.
-    pub fn adjust_exponent_to(&self, exponent: i16) -> FloatResult<Self> {
+    pub fn adjust_exponent_to(&self, exponent: i16) -> ExactOrRounded<Self> {
         let mut adj = *self;
         adj.exponent = exponent;
 
@@ -150,12 +142,7 @@ impl Decomposed {
                 self.exponent, exponent, shift, self, adj
             );
 
-            if self.significand == back {
-                FloatResult::Exact(adj)
-            } else {
-                // FIXME should this be `TooLarge`, logically?
-                FloatResult::Rounded(adj)
-            }
+            ExactOrRounded::exact_if(adj, self.significand == back)
         } else if exponent > self.exponent {
             // larger exponent, need to shift significand right to adjust
             let shift = (exponent - self.exponent) as u16;
@@ -166,14 +153,10 @@ impl Decomposed {
                 self.exponent, exponent, shift, self, adj
             );
 
-            if self.significand == back {
-                FloatResult::Exact(adj)
-            } else {
-                FloatResult::Rounded(adj)
-            }
+            ExactOrRounded::exact_if(adj, self.significand == back)
         } else {
             // already at the target exponent
-            FloatResult::Exact(adj)
+            ExactOrRounded::Exact(adj)
         }
     }
 
@@ -181,47 +164,28 @@ impl Decomposed {
         self.significand.raw().leading_zeros() == Self::LEADING_ZEROS_WHEN_NORMALIZED
     }
 
-    pub fn as_f32_significand(&self) -> FloatResult<u32> {
+    pub fn as_f32_significand(&self) -> ExactOrRounded<u32> {
         // FIXME this is *still* wrong since it has to *change* self's exponent
         // 23 fraction bits
-        let result = self.reduced_fraction(23);
-        let exact = result.is_exact();
-        let result = result.unwrap_exact_or_rounded() as u32;
-        if exact {
-            FloatResult::Exact(result)
-        } else {
-            FloatResult::Rounded(result)
-        }
+        self.reduced_fraction(23).map(|result| result as u32)
     }
 
-    pub fn as_f64_significand(&self) -> FloatResult<u64> {
+    pub fn as_f64_significand(&self) -> ExactOrRounded<u64> {
         // 52 fraction bits
-        let result = self.reduced_fraction(52);
-        let exact = result.is_exact();
-        let result = result.unwrap_exact_or_rounded();
-        if exact {
-            FloatResult::Exact(result)
-        } else {
-            FloatResult::Rounded(result)
-        }
+        self.reduced_fraction(52)
     }
 
-    pub fn as_f80_fraction(&self) -> FloatResult<u64> {
+    pub fn as_f80_fraction(&self) -> ExactOrRounded<u64> {
         // 63 fraction bits
-        let result = self.reduced_fraction(63);
-        let exact = result.is_exact();
-        let result = result.unwrap_exact_or_rounded();
-        if exact {
-            FloatResult::Exact(result)
-        } else {
-            FloatResult::Rounded(result)
-        }
+        self.reduced_fraction(63)
     }
 
+    /// Returns `self` as the complete significand for an `f80`, including the
+    /// integer bit.
+    ///
+    /// If the integer part is larger than 1, this returns `TooLarge` or
+    /// `TooSmall`, depending on the sign bit.
     pub fn as_f80_significand(&self) -> FloatResult<u64> {
-        let fraction = self.as_f80_fraction();
-        let exact = fraction.is_exact();
-        let fraction = fraction.unwrap_exact_or_rounded();
         if self.integer_bits() > 1 {
             if self.sign {
                 return FloatResult::TooSmall;
@@ -229,13 +193,10 @@ impl Decomposed {
                 return FloatResult::TooLarge;
             }
         }
-        let int = self.integer_bits() == 1;
-        let significand = if int { 1 << 63 } else { 0 };
-        if exact {
-            FloatResult::Exact(significand | fraction)
-        } else {
-            FloatResult::Rounded(significand | fraction)
-        }
+
+        let int = if self.integer_bits() == 1 { 1 << 63 } else { 0 };
+
+        self.as_f80_fraction().map(|fraction| int | fraction).into()
     }
 
     /// Rounds the fraction bits to get the given number of fraction bits.
@@ -245,7 +206,7 @@ impl Decomposed {
     /// can also produce smaller outputs for use in `f32` or `f64`.
     ///
     /// Note that this will not return any integer bits.
-    fn reduced_fraction(&self, bits: u8) -> FloatResult<u64> {
+    fn reduced_fraction(&self, bits: u8) -> ExactOrRounded<u64> {
         // FIXME store and use real rounding mode
         self.significand.reduced_fraction(bits, self.sign, RoundingMode::Nearest)
     }
@@ -255,7 +216,8 @@ impl Decomposed {
     /// Depending on the previous value of `self`, this can influence integer
     /// bits and denormalize the result. Call `normalize` again to perform
     /// "postnormalization".
-    pub fn round_to(&self, bits: u8) -> FloatResult<Self> {
+    pub fn round_to(&self, bits: u8) -> ExactOrRounded<Self> {
+        // FIXME store and use real rounding mode
         self.significand.round_to(bits, self.sign, RoundingMode::Nearest).map(|result| {
             Self {
                 sign: self.sign,
@@ -265,7 +227,7 @@ impl Decomposed {
         }).into()
     }
 
-    pub fn round(&self) -> FloatResult<Self> {
+    pub fn round(&self) -> ExactOrRounded<Self> {
         self.round_to(63)
     }
 
@@ -392,10 +354,10 @@ impl Significand {
     /// can also produce smaller outputs for use in `f32` or `f64`.
     ///
     /// Note that this will not return any integer bits.
-    fn reduced_fraction(&self, bits: u8, sign: bool, rounding: RoundingMode) -> FloatResult<u64> {
+    fn reduced_fraction(&self, bits: u8, sign: bool, rounding: RoundingMode) -> ExactOrRounded<u64> {
         self.round_to(bits, sign, rounding).map(|rounded| {
             rounded.fraction_bits() >> (63 - bits)
-        }).into()
+        })
     }
 }
 

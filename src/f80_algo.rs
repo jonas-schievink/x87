@@ -37,7 +37,7 @@ impl f80 {
         let exp = cmp::max(l.exponent(), r.exponent());
         let (l, r) = (l.adjust_exponent_to(exp), r.adjust_exponent_to(exp));
         let exact = l.is_exact() && r.is_exact();
-        let (l, r) = (l.unwrap_exact_or_rounded(), r.unwrap_exact_or_rounded());
+        let (l, r) = (l.into_inner(), r.into_inner());
         trace!("lhs={:?}", l);
         trace!("rhs={:?}", r);
 

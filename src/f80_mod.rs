@@ -132,18 +132,22 @@ impl f80 {
     /// space.
     pub fn from_decomposed(decomp: Decomposed) -> FloatResult<Self> {
         let orig_decomp = decomp;
-        let norm = decomp.normalize();
-        let exact = norm.is_exact();
-        let decomp = norm.unwrap_exact_or_rounded().round();
-        let exact = exact && decomp.is_exact();
-        let rounded = decomp.unwrap_exact_or_rounded();
-        let decomp = rounded.normalize();
-        let exact = exact && decomp.is_exact();
-        let decomp = decomp.unwrap_exact_or_rounded();
         trace!("from_decomposed:     orig: {:?}", orig_decomp);
-        trace!("from_decomposed: normaliz: {:?}", norm);
-        trace!("from_decomposed:  rounded: {:?}", rounded);
-        trace!("from_decomposed: postnorm: {:?}", decomp);
+        let decomp = decomp.normalize()
+            .chain(|norm| {
+                trace!("from_decomposed: normaliz: {:?}", norm);
+                norm.round()
+            })
+            .chain(|rounded| {
+                trace!("from_decomposed:  rounded: {:?}", rounded);
+                rounded.normalize()
+            })
+            .map(|decomp| {
+                trace!("from_decomposed: postnorm: {:?}", decomp);
+                decomp
+            });
+        let exact = decomp.is_exact();
+        let decomp = decomp.into_inner();
 
         let sign = if decomp.sign { 1 << 79 } else { 0 };
 
@@ -185,9 +189,9 @@ impl f80 {
             // case this.
             let denorm = decomp.adjust_exponent_to(f80::DENORMAL_EXPONENT);
             let exact = exact && denorm.is_exact();
-            let significand = denorm.unwrap_exact_or_rounded().as_f80_fraction();
+            let significand = denorm.into_inner().as_f80_fraction();
             let exact = exact && significand.is_exact();
-            let significand = u128::from(significand.unwrap_exact_or_rounded());
+            let significand = u128::from(significand.into_inner());
 
             // Encode denormal.
             let result = f80(sign | significand);
@@ -218,10 +222,10 @@ impl f80 {
         trace!("to_f32_checked: self={:?}={:?}={:?}", self, classified, classified.decompose());
         match classified {
             Classified::Zero { sign } => {
-                FloatResult::Exact(if sign { -0.0 } else { 0.0 })
+                return FloatResult::Exact(if sign { -0.0 } else { 0.0 });
             },
             Classified::Inf { sign } => {
-                FloatResult::Exact(if sign { -1.0/0.0 } else { 1.0/0.0 })
+                return FloatResult::Exact(if sign { -1.0 / 0.0 } else { 1.0 / 0.0 });
             },
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
             // the significand as an "is_quiet" flag. x87 does this and it
@@ -240,88 +244,82 @@ impl f80 {
 
                 let result = f32::recompose_raw(sign, raw_exp, fraction);
                 if payload == u64::from(pl) << 40 {
-                    FloatResult::Exact(result)
+                    return FloatResult::Exact(result);
                 } else {
-                    FloatResult::LostNaN(result)
+                    return FloatResult::LostNaN(result);
                 }
             }
-            _ => {
-                let decomp = self.decompose().unwrap();
+            _ => {}
+        }
 
-                let orig_decomp = decomp;
-                let norm = decomp.normalize();
-                let exact = norm.is_exact();
-                let decomp = norm.unwrap_exact_or_rounded().round_to(23);
-                let exact = exact && decomp.is_exact();
-                let rounded = decomp.unwrap_exact_or_rounded();
-                let decomp = rounded.normalize();
-                let exact = exact && decomp.is_exact();
-                let decomp = decomp.unwrap_exact_or_rounded();
-                trace!("to_f32_checked:     orig: {:?}", orig_decomp);
+        // Finite (normal or denormal)
+        let decomp = self.decompose().unwrap();
+        trace!("to_f32_checked:     orig: {:?}", decomp);
+        let decomp = decomp.normalize()
+            .chain(|norm| {
                 trace!("to_f32_checked: normaliz: {:?}", norm);
+                norm.round_to(23)
+            })
+            .chain(|rounded| {
                 trace!("to_f32_checked:  rounded: {:?}", rounded);
+                rounded.normalize()
+            })
+            .map(|decomp| {
                 trace!("to_f32_checked: postnorm: {:?}", decomp);
+                decomp
+            });
+        let exact = decomp.is_exact();
+        let decomp = decomp.into_inner();
 
-                // If the exponent is too small for f32, try encoding as a
-                // denormal, then fall back to rounding to 0. If it's too large,
-                // we've hit +/-Inf.
-                if decomp.exponent() >= -126 && decomp.exponent() <= 127 {
-                    // Fits in a normal f32, but significand might need
-                    // rounding. Go from 63 fraction bits to 23:
-                    let fraction = decomp.as_f32_significand();
-                    let exact = fraction.is_exact();
-                    let fraction = fraction.unwrap_exact_or_rounded();
-                    let result = f32::recompose(decomp.sign, decomp.exponent(), fraction);
-                    trace!("normal; exp={}; frac={:X}; exact={}; result={}", decomp.exponent(), fraction, exact, result);
-                    if exact {
-                        FloatResult::Exact(result)
-                    } else {
-                        FloatResult::Rounded(result)
-                    }
-                } else if decomp.exponent() < -126 {
-                    // Too close to 0.0 to be a normal float. Try denormal,
-                    // rounding to zero if that also doesn't fit.
-                    // Denormals need an exponent of -126:
-                    let decomp = decomp.adjust_exponent_to(-126);
-                    let exact = exact && decomp.is_exact();
-                    let decomp = decomp.unwrap_exact_or_rounded();
-                    // Extract the 23 fraction bits we have left:
-                    let fraction = decomp.as_f32_significand();
-                    let exact = exact && fraction.is_exact();
-                    let fraction = fraction.unwrap_exact_or_rounded();
+        // If the exponent is too small for f32, try encoding as a
+        // denormal, then fall back to rounding to 0. If it's too large,
+        // we've hit +/-Inf.
+        if decomp.exponent() >= -126 && decomp.exponent() <= 127 {
+            // Fits in a normal f32, but significand might need
+            // rounding. Go from 63 fraction bits to 23:
+            decomp.as_f32_significand().map(|fraction| {
+                let result = f32::recompose(decomp.sign, decomp.exponent(), fraction);
+                trace!("normal; exp={}; frac={:X}; exact={}; result={}", decomp.exponent(), fraction, exact, result);
+                result
+            }).into()
+        } else if decomp.exponent() < -126 {
+            // Too close to 0.0 to be a normal float. Try denormal,
+            // rounding to zero if that also doesn't fit.
+            // Denormals need an exponent of -126:
+            decomp.adjust_exponent_to(-126)
+                .keep_exact_if(exact)
+                .chain(|decomp| {
+                    // Extract the fraction bits we have left:
+                    decomp.as_f32_significand()
+                }).map(|fraction| {
                     trace!("needs denormal. adj={:?}; exact={}", decomp, exact);
                     // The `fraction` bits might end up being all zero. In that
-                    // case, the f32 will encode zero, which is correct here.
+                    // case, the f64 will encode zero, which is correct here.
                     let sign = if decomp.sign { 0x8000_0000 } else { 0 };
-                    let result = f32::from_bits(sign | fraction);
-                    if exact {
-                        FloatResult::Exact(result)
-                    } else {
-                        FloatResult::Rounded(result)
-                    }
-                } else {
-                    // Exponent too large. Number too large or small for f32
-                    // range. "Round" to +/-Inf.
-                    if decomp.sign {
-                        FloatResult::TooSmall
-                    } else {
-                        FloatResult::TooLarge
-                    }
-                }
+                    f32::from_bits(sign | fraction)
+            }).into()
+        } else {
+            // Exponent too large. Number too large or small for f32
+            // range. "Round" to +/-Inf.
+            if decomp.sign {
+                FloatResult::TooSmall
+            } else {
+                FloatResult::TooLarge
             }
         }
     }
 
+    // FIXME We should **REALLY** deduplicate these to_f32/to_f64!!
     /// Converts `self` to an `f64`, reporting any loss of information (eg. by
     /// rounding).
     pub fn to_f64_checked(&self) -> FloatResult<f64> {
         let classified = self.classify();
         match classified {
             Classified::Zero { sign } => {
-                FloatResult::Exact(if sign { -0.0 } else { 0.0 })
+                return FloatResult::Exact(if sign { -0.0 } else { 0.0 });
             },
             Classified::Inf { sign } => {
-                FloatResult::Exact(if sign { -1.0/0.0 } else { 1.0/0.0 })
+                return FloatResult::Exact(if sign { -1.0 / 0.0 } else { 1.0 / 0.0 });
             },
             // We assume the host is IEEE 754-2008 compliant and uses the MSb of
             // the significand as an "is_quiet" flag. x87 does this and it
@@ -339,74 +337,67 @@ impl f80 {
 
                 let result = f64::recompose_raw(sign, raw_exp, fraction);
                 if payload == pl.into() {
-                    FloatResult::Exact(result)
+                    return FloatResult::Exact(result);
                 } else {
-                    FloatResult::LostNaN(result)
+                    return FloatResult::LostNaN(result);
                 }
             }
-            _ => {
-                let decomp = self.decompose().unwrap();
+            _ => {}
+        }
 
-                let orig_decomp = decomp;
-                let norm = decomp.normalize();
-                let exact = norm.is_exact();
-                let decomp = norm.unwrap_exact_or_rounded().round_to(52);
-                let exact = exact && decomp.is_exact();
-                let rounded = decomp.unwrap_exact_or_rounded();
-                let decomp = rounded.normalize();
-                let exact = exact && decomp.is_exact();
-                let decomp = decomp.unwrap_exact_or_rounded();
-                trace!("to_f64_checked:     orig: {:?}", orig_decomp);
+        // Finite (normal or denormal)
+        let decomp = self.decompose().unwrap();
+        trace!("to_f64_checked:     orig: {:?}", decomp);
+        let decomp = decomp.normalize()
+            .chain(|norm| {
                 trace!("to_f64_checked: normaliz: {:?}", norm);
+                norm.round_to(52)
+            })
+            .chain(|rounded| {
                 trace!("to_f64_checked:  rounded: {:?}", rounded);
+                rounded.normalize()
+            })
+            .map(|decomp| {
                 trace!("to_f64_checked: postnorm: {:?}", decomp);
+                decomp
+            });
+        let exact = decomp.is_exact();
+        let decomp = decomp.into_inner();
 
-                // If the exponent is too small for f64, try encoding as a
-                // denormal, then fall back to rounding to 0. If it's too large,
-                // we've hit +/-Inf.
-                if decomp.exponent() >= -1022 && decomp.exponent() <= 1023 {
-                    // Fits in a normal f64, but significand might need
-                    // rounding. Go from 63 fraction bits to 52:
-                    let fraction = decomp.as_f64_significand();
-                    let exact = fraction.is_exact();
-                    let fraction = fraction.unwrap_exact_or_rounded();
-                    let result = f64::recompose(decomp.sign, decomp.exponent(), fraction);
-                    trace!("normal; exp={}; frac={:X}; exact={}; result={}", decomp.exponent(), fraction, exact, result);
-                    if exact {
-                        FloatResult::Exact(result)
-                    } else {
-                        FloatResult::Rounded(result)
-                    }
-                } else if decomp.exponent() < -1022 {
-                    // Too close to 0.0 to be a normal float. Try denormal,
-                    // rounding to zero if that also doesn't fit.
-                    // Denormals need an exponent of -1022:
-                    let decomp = decomp.adjust_exponent_to(-1022);
-                    let exact = exact && decomp.is_exact();
-                    let decomp = decomp.unwrap_exact_or_rounded();
+        // If the exponent is too small for f64, try encoding as a
+        // denormal, then fall back to rounding to 0. If it's too large,
+        // we've hit +/-Inf.
+        if decomp.exponent() >= -1022 && decomp.exponent() <= 1023 {
+            // Fits in a normal f64, but significand might need
+            // rounding. Go from 63 fraction bits to 52:
+            decomp.as_f64_significand().map(|fraction| {
+                let result = f64::recompose(decomp.sign, decomp.exponent(), fraction);
+                trace!("normal; exp={}; frac={:X}; exact={}; result={}", decomp.exponent(), fraction, exact, result);
+                result
+            }).into()
+        } else if decomp.exponent() < -1022 {
+            // Too close to 0.0 to be a normal float. Try denormal,
+            // rounding to zero if that also doesn't fit.
+            // Denormals need an exponent of -1022:
+            decomp.adjust_exponent_to(-1022)
+                .keep_exact_if(exact)
+                .chain(|decomp| {
                     // Extract the 52 fraction bits we have left:
-                    let fraction = decomp.as_f64_significand();
-                    let exact = exact && fraction.is_exact();
-                    let fraction = fraction.unwrap_exact_or_rounded();
+                    decomp.as_f64_significand()
+                }).map(|fraction| {
                     trace!("needs denormal. adj={:?}; exact={}", decomp, exact);
                     // The `fraction` bits might end up being all zero. In that
                     // case, the f64 will encode zero, which is correct here.
                     let sign = if decomp.sign { 0x8000_0000_0000_0000 } else { 0 };
-                    let result = f64::from_bits(sign | fraction);
-                    if exact {
-                        FloatResult::Exact(result)
-                    } else {
-                        FloatResult::Rounded(result)
-                    }
-                } else {
-                    // Exponent too large. Number too large or small for f64
-                    // range. "Round" to +/-Inf.
-                    if decomp.sign {
-                        FloatResult::TooSmall
-                    } else {
-                        FloatResult::TooLarge
-                    }
-                }
+                    f64::from_bits(sign | fraction)
+                }).into()
+        } else {
+            // Exponent too large. Number too large or small for f64
+            // range. "Round" to +/-Inf.
+            if decomp.sign {
+                FloatResult::TooSmall
+            } else {
+                FloatResult::TooLarge
             }
         }
     }
