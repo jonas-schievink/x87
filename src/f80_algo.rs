@@ -6,7 +6,12 @@
 
 use {f80, Classified, RoundingMode, FloatResult};
 use decomposed::Decomposed;
-use std::cmp;
+use sign_mag::SignMagnitude;
+
+use num_bigint::BigUint;
+use num_traits::cast::ToPrimitive;
+
+use std::{cmp, u128};
 
 impl f80 {
     pub fn add_checked(self, rhs: Self, _rounding: RoundingMode) -> FloatResult<Self> {
@@ -64,6 +69,59 @@ impl f80 {
         self.add_checked(-rhs, rounding)
     }
 
+    pub fn mul_checked(self, rhs: Self, _rounding: RoundingMode) -> FloatResult<Self> {
+        let lhs = self;
+        let (lhs_c, rhs_c) = match lhs.propagate_nans(rhs) {
+            Ok((lhs_c, rhs_c)) => (lhs_c, rhs_c),
+            Err(res) => return res,
+        };
+
+        match (&lhs_c, &rhs_c) {
+            (Classified::Inf { sign: lsign }, Classified::Inf{ sign: rsign }) => {
+                if lsign == rsign { // lhs == rhs
+                    return FloatResult::Exact(lhs);
+                } else {
+                    return FloatResult::InvalidOperand { sign: true };
+                }
+            }
+            (Classified::Inf {..}, _) => return FloatResult::Exact(lhs),
+            (_, Classified::Inf {..}) => return FloatResult::Exact(rhs),
+            _ => {}
+        }
+
+        let (l, r) = (lhs_c.decompose().unwrap(), rhs_c.decompose().unwrap());
+        trace!("mul l cls: {:?}; decomp: {:?}", lhs_c, l);
+        trace!("mul r cls: {:?}; decomp: {:?}", rhs_c, r);
+
+        let exponent = l.exponent() + r.exponent();
+        let (l, r) = (l.to_sign_magnitude(), r.to_sign_magnitude());
+        let sign = l.sign() != r.sign();
+        let mag = BigUint::from(l.magnitude()) * BigUint::from(r.magnitude());
+        trace!("mul: {:#X} * {:#X} = {:#X}", l.magnitude(), r.magnitude(), mag);
+
+        // The product has twice the bits of the significand. Shift it back to
+        // adjust and make sure the shifted bits end up in the sticky bit.
+        let bits: usize = 63 + 3;   // 63 fraction bits + 3 extra bits (GRS)
+        let mask: u128 = (1 << bits) - 1;
+        let dropped_bits = &mag & BigUint::from(mask);
+        let sticky = dropped_bits != BigUint::from(0u8);
+        let mag = mag >> bits;
+        trace!("mul: dropped bits={:#X}, left={:#X}, sticky={}", dropped_bits, mag, sticky);
+        assert!(mag < u128::MAX.into());
+
+        let product = SignMagnitude::new(sign, mag.to_u128()
+            .expect("multiplication exceeds u128 range"));
+        let mut product_decomp = Decomposed::with_sign_magnitude_exponent(product, exponent);
+        if sticky {
+            product_decomp.set_sticky();
+        }
+        trace!("product={:?}", product_decomp);
+        let product = f80::from_decomposed(product_decomp);
+        trace!("product decomp: {:?}", product.into_inner().decompose());
+
+        product
+    }
+
     /// Classifies `self` and `rhs`, returning an `Err` when one of them is NaN.
     fn propagate_nans(self, rhs: Self) -> Result<(Classified, Classified), FloatResult<Self>> {
         // short-circuit on invalid operands (which might turn into QNaNs later)
@@ -119,6 +177,18 @@ mod tests {
     fn add_simple() {
         let two = f80::from(1.0f32) + f80::from(1.0f32);
         assert_eq!(two, f80::from(2.0f32));
+    }
+
+    #[test]
+    fn mul_simple() {
+        env_logger::try_init().ok();
+        assert_eq!(f80::from(1.0f32) * f80::from(1.0f32), f80::from(1.0f32));
+        assert_eq!(f80::from(1.0f32) * f80::from(2.0f32), f80::from(2.0f32));
+        assert_eq!(f80::from(0.0f32) * f80::from(1.0f32), f80::from(0.0f32));
+        assert_eq!(f80::from(-1.0f32) * f80::from(1.0f32), f80::from(-1.0f32));
+        assert_eq!(f80::from(-1.0f32) * f80::from(-1.0f32), f80::from(1.0f32));
+        assert_eq!(f80::from(0.5f32) * f80::from(1.0f32), f80::from(0.5f32));
+        assert_eq!(f80::from(0.5f32) * f80::from(1.5f32), f80::from(0.75f32));
     }
 
     fn addition(lhs_bits: u32, rhs_bits: u32) {

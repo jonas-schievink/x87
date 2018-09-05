@@ -15,6 +15,8 @@ license = "CC0-1.0"
 bitflags = "1.0.4"
 log = "0.4.4"
 ieee754 = "0.2.2"
+num-bigint = "0.2.0"
+num-traits = "0.2.5"
 
 [dev-dependencies]
 version-sync = "0.5"

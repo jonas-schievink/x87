@@ -62,3 +62,11 @@ impl ops::Sub for f80 {
         self.sub_checked(rhs, RoundingMode::default()).into_inner()
     }
 }
+
+impl ops::Mul for f80 {
+    type Output = f80;
+
+    fn mul(self, rhs: f80) -> f80 {
+        self.mul_checked(rhs, RoundingMode::default()).into_inner()
+    }
+}

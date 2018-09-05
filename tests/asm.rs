@@ -136,6 +136,38 @@ fn sub32(lhs_bits: u32, rhs_bits: u32) {
     );
 }
 
+fn mul32(lhs_bits: u32, rhs_bits: u32) {
+    let (lhs, rhs) = (f32::from_bits(lhs_bits), f32::from_bits(rhs_bits));
+
+    let mut native_f32_prod = 0.0f32;
+    let mut native_f80_prod = [0u8; 10];
+    // Note that operands are pushed in reversed order
+    run_host_asm!(r"
+        flds $1
+        flds $0
+        fmulp
+        fsts $2
+        fstpt $3
+    " : "=*m"(&lhs), "=*m"(&rhs), "=*m"(&mut native_f32_prod), "=*m"(&mut native_f80_prod));
+
+    let (l80, r80) = (f80::from(lhs), f80::from(rhs));
+    let f80prod = l80 * r80;
+    let f80_f32bits = f80prod.to_f32().to_bits();
+
+    let f80native = f80::from_bytes(native_f80_prod);
+    assert_eq!(
+        f80_f32bits, native_f32_prod.to_bits(),
+        "f32 product mismatch: x87:{}={:?}={:#010X}={:?}, native:{}={:?}={:#010X}={:?}",
+        f80prod.to_f32(), f80prod.to_f32().classify(), f80_f32bits, f80prod.to_f32().decompose(),
+        native_f32_prod, native_f32_prod.classify(), native_f32_prod.to_bits(), native_f32_prod.decompose(),
+    );
+    assert_eq!(
+        f80prod.to_bytes(), native_f80_prod,
+        "f80 product mismatch: x87:{:?}={:?}, native:{:?}={:?}",
+        f80prod, f80prod.classify(), f80native, f80native.classify(),
+    );
+}
+
 /// Discrepancy in NaN payload propagation between the crate and host FPU.
 ///
 /// Converting an f32 NaN to f80 should place its payload in the upper bits of
@@ -215,6 +247,30 @@ fn zero_minus_nan() {
     sub32(0, 2139095041);
 }
 
+#[test]
+fn mul_denormal_zero() {
+    env_logger::try_init().ok();
+    mul32(0, 1);
+    mul32(1, 0);
+}
+
+#[test]
+fn mul_f32_denormals() {
+    env_logger::try_init().ok();
+    mul32(1, 3);
+}
+
+/// There appears to be a bug when encoding a denormal f32 result that causes a
+/// deviation of 1 ULP against both native x87 and IEEE f32 arithmetic.
+///
+/// (this also causes `mul_f32` to fail)
+#[test]
+#[ignore]   // FIXME find and fix this bug
+fn mul_rounding_denormal_result() {
+    env_logger::try_init().ok();
+    mul32(2496593444, 706412423);
+}
+
 // Note that many of the proptests are duplicated in `f80.rs` - the versions in
 // there do not need asm! or an x86 host as they test against the operations on
 // `f32`/`f64`. The ones in here test against the host FPU.
@@ -230,5 +286,12 @@ proptest! {
     #[test]
     fn sub_f32(lhs_bits: u32, rhs_bits: u32) {
         sub32(lhs_bits, rhs_bits);
+    }
+}
+
+proptest! {
+    #[test]
+    fn mul_f32(lhs_bits: u32, rhs_bits: u32) {
+        mul32(lhs_bits, rhs_bits);
     }
 }

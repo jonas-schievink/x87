@@ -1,4 +1,4 @@
-use std::ops::{Add, Sub, Neg, Mul};
+use std::ops::{Add, Neg};
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -90,26 +90,6 @@ impl Add for SignMagnitude {
                 sign,
                 magnitude: mag,
             }
-        }
-    }
-}
-
-impl Sub for SignMagnitude {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self {
-        self + -rhs
-    }
-}
-
-impl Mul for SignMagnitude {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self {
-        let sign = self.sign != rhs.sign;
-        Self {
-            sign,
-            magnitude: self.magnitude * rhs.magnitude,
         }
     }
 }

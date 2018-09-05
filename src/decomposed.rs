@@ -64,6 +64,10 @@ impl Decomposed {
         }
     }
 
+    pub fn set_sticky(&mut self) {
+        self.significand.set_sticky();
+    }
+
     pub fn exponent(&self) -> i16 {
         self.exponent
     }
@@ -150,9 +154,11 @@ impl Decomposed {
             adj.significand = self.significand >> shift;
             let back = adj.significand << shift;
             trace!(
-                "adj_exponent: prev exp={}; new exp={}; right by >> {}; {:?} -> {:?}",
-                self.exponent, exponent, shift, self, adj
+                "adj_exponent: prev exp={}; new exp={}; right by >> {}",
+                self.exponent, exponent, shift
             );
+            trace!("adj_exponent: prev value={:?}", self);
+            trace!("adj_exponent: adj  value={:?}", adj);
 
             ExactOrRounded::exact_if(adj, self.significand == back)
         } else {
@@ -293,11 +299,17 @@ impl Significand {
         ((self.significand >> 3) & 0x7fff_ffff_ffff_ffff) as u64
     }
 
+    fn set_sticky(&mut self) {
+        self.significand |= 1;
+    }
+
     fn sticky_bit(&self) -> u128 {
         self.significand & 1
     }
 
     fn round_to(&self, bits: u8, _sign: bool, rounding: RoundingMode) -> ExactOrRounded<Self> {
+        use log::Level::Trace;
+
         assert!(bits <= 64, "too many bits for a u64");
         // f80 has 63 fraction bits, we have more for the overflow calculations
 
@@ -311,7 +323,13 @@ impl Significand {
         let round = self.significand & r_mask != 0;
         let sticky = self.significand & s_mask != 0;
         let truncated = self.significand >> (63 - bits + 3);  // drop GRS bits
-        trace!("reduced_fraction: self={:?}, bits={}, dropped={}, g_pos={}, r_pos={}, grs={},{},{}, lsb={}", self, bits, 63-bits, g_pos, r_pos, guard, round, sticky, truncated & 1);
+        trace!("round_to: self={:?}, bits={}, dropped={}, g_pos={}, r_pos={}, grs={},{},{}, lsb={}", self, bits, 63-bits, g_pos, r_pos, guard, round, sticky, truncated & 1);
+
+        if log_enabled!(Trace) {
+            // Visualize the used bits of the fraction
+            let int_chars = format!("{:#b}", self.integer_bits()).len();
+            trace!("round_to:      {}{}grs", " ".repeat(int_chars + 1), "-".repeat(bits.into()));
+        }
 
         // Now we can adjust the truncated value using the GR and S bits.
         let rounded = match rounding {
@@ -342,7 +360,7 @@ impl Significand {
 
         let back = rounded << (63 - bits + 3);
         let result = Significand::from_raw(back);
-        trace!("reduced_fraction: -> {:?}", result);
+        trace!("round_to:   -> {:?}", result);
 
         ExactOrRounded::exact_if(result, back == self.significand)
     }

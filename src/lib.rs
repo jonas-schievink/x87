@@ -14,7 +14,8 @@
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate log;
 extern crate ieee754;
-extern crate core;
+extern crate num_traits;
+extern crate num_bigint;
 
 mod utils;
 mod decomposed;
